@@ -16,6 +16,41 @@ https://github.com/user-attachments/assets/a42e7457-fcc8-40da-83fc-784c45a8b95d
 
 <br/>
 
+## OpenClaw 二开说明
+
+这是一个基于上游 `AIDC-AI/Pixelle-Video` 的 OpenClaw 二开快照仓库，当前已新增一条用于 **“脚本 + 自带素材 + 对话式配置收集”** 的 demo 视频剪辑链路。
+
+### 当前新增内容
+
+- 新增 pipeline：`pixelle_video/pipelines/scripted_asset_edit.py`
+- 新增 API schema：`api/schemas/video_edit.py`
+- 新增 API router：`api/routers/video_edit.py`
+- 已注册新 pipeline：`scripted_asset_edit`
+- 已新增同步接口：`POST /api/video/scripted-asset-edit/sync`
+- 支持最小验证模式：`skip_asset_analysis=true`，可跳过 ComfyUI/RunningHub 的素材语义分析，优先验证“提供文案 + 提供素材 + 模板渲染 + TTS + 合成”主链路
+
+### 新接口用途
+
+该接口面向一个视频自动化剪辑 demo skill，目标流程是：
+
+1. 用户直接提供文案
+2. 用户直接提供图片/视频素材
+3. 用户可选提供 TTS / 声音克隆 / BGM / 剪辑说明
+4. 系统按结构化参数执行最小视频剪辑流程并输出 demo 视频
+
+### 当前局限
+
+- `scripted_asset_edit` 目前仍是 MVP 骨架
+- 当前文案拆分后默认按顺序映射素材，支持素材复用
+- `editing_instruction` / `pace` / `transition_style` 已接入参数层，但还没有完全转成精细剪辑规则
+- 返回结果中的 `duration` 仍建议后续改为用 `ffprobe` 对最终成片做真实探测
+
+### Demo 输出示例
+
+仓库中已附带一次最小成功验证的视频输出：
+
+- `demo-output/demo-min-real.mp4`
+
 只需输入一个 **主题**，Pixelle-Video 就能自动完成：
 - ✍️ 撰写视频文案  
 - 🎨 生成 AI 配图/视频  
