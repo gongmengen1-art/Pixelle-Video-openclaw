@@ -40,3 +40,15 @@ python3 skills/video-edit-assistant/run_skill.py \
   --execute \
   --pretty
 ```
+
+如果你要模拟 Telegram 多轮 `/video-edit` 场景，可以使用桥接入口：
+
+```bash
+python3 skills/video-edit-assistant/telegram_bridge_cli.py \
+  --user-key telegram-7217243523 \
+  --patch '{"project_name":"产品介绍视频"}' \
+  --aspect-ratio 9:16 \
+  --pretty
+```
+
+后续继续补第二轮、第三轮 patch 即可；当必填信息齐全时，会自动执行，并且如果带上 `--upload-oss` 会直接返回 OSS 链接。

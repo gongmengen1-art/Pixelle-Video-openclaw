@@ -6,6 +6,7 @@
 """API endpoints for scripted asset editing demo pipeline."""
 
 import os
+import ffmpeg
 from fastapi import APIRouter, HTTPException, Request
 from loguru import logger
 
@@ -58,7 +59,13 @@ async def generate_scripted_asset_edit_sync(
 
         file_size = os.path.getsize(result_ctx.final_video_path) if os.path.exists(result_ctx.final_video_path) else 0
         video_url = path_to_url(request, result_ctx.final_video_path)
-        duration = getattr(result_ctx.storyboard, "total_duration", 0.0) if getattr(result_ctx, "storyboard", None) else 0.0
+        duration = 0.0
+        try:
+            if os.path.exists(result_ctx.final_video_path):
+                probe = ffmpeg.probe(result_ctx.final_video_path)
+                duration = float(probe['format']['duration'])
+        except Exception:
+            duration = getattr(result_ctx.storyboard, "total_duration", 0.0) if getattr(result_ctx, "storyboard", None) else 0.0
 
         return ScriptedAssetEditResponse(
             video_url=video_url,

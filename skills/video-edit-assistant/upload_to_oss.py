@@ -5,8 +5,6 @@ import mimetypes
 from pathlib import Path
 from urllib.parse import quote
 
-import oss2
-
 DEFAULT_STS_PATH = Path('/home/xvibe/.sts')
 DEFAULT_BUCKET = '301-chinamobile'
 DEFAULT_ENDPOINT = 'oss-accelerate.aliyuncs.com'
@@ -43,8 +41,10 @@ def upload_file_to_oss(local_path: str | Path, object_key: str | None = None, *,
     if object_key is None:
         object_key = f"{cfg['prefix']}{local.name}"
 
+    import oss2
+
     auth = oss2.StsAuth(cfg['access_key_id'], cfg['access_key_secret'], cfg['security_token'])
-    bucket = oss2.Bucket(auth, f'https://{cfg['endpoint']}', cfg['bucket'])
+    bucket = oss2.Bucket(auth, f"https://{cfg['endpoint']}", cfg['bucket'])
 
     headers = {}
     content_type, _ = mimetypes.guess_type(local.name)
