@@ -51,7 +51,8 @@ https://github.com/user-attachments/assets/a42e7457-fcc8-40da-83fc-784c45a8b95d
 另外，仓库已经补上第一版可复用的 intake 代码：
 
 - `skills/video_edit_intake.py`：草稿合并、缺失项检测、默认值填充、payload 生成
-- `skills/test_video_edit_intake.py`：最小单元测试示例
+- `skills/video_edit_assistant_runtime.py`：会话运行时，负责返回当前 draft、缺失项、追问列表和最终 payload
+- `skills/video_edit_runtime_example.py`：最小运行示例
 
 ### 当前局限
 
