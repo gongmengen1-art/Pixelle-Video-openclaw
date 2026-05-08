@@ -30,3 +30,13 @@ python3 skills/video-edit-assistant/run_skill.py \
   --aspect-ratio 9:16 \
   --pretty
 ```
+
+如果本地 API 已启动，还可以直接执行闭环生成：
+
+```bash
+python3 skills/video-edit-assistant/run_skill.py \
+  --patch '{"project_name":"brand-demo","script_text":"第一段\\n第二段","asset_paths":["/tmp/a.mp4","/tmp/b.mp4"]}' \
+  --aspect-ratio 9:16 \
+  --execute \
+  --pretty
+```
