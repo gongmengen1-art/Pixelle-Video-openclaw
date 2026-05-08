@@ -10,8 +10,11 @@ _skill_dir = Path(__file__).resolve().parent
 _project_root = _skill_dir.parent.parent
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
+if str(_skill_dir) not in sys.path:
+    sys.path.insert(0, str(_skill_dir))
 
 from skills.video_edit_assistant_adapter import run_video_edit_intake
+from upload_to_oss import upload_file_to_oss
 
 
 def _load_json_arg(value: str | None):
@@ -45,6 +48,7 @@ def main() -> int:
     parser.add_argument("--question-limit", type=int, default=3)
     parser.add_argument("--execute", action="store_true", help="When ready=true, call the local API automatically")
     parser.add_argument("--api-base", default="http://127.0.0.1:8011", help="Base URL for Pixelle-Video API")
+    parser.add_argument("--upload-oss", action="store_true", help="Upload generated video to OSS after execute")
     parser.add_argument("--pretty", action="store_true")
     args = parser.parse_args()
 
@@ -61,6 +65,19 @@ def main() -> int:
             "api_url": api_url,
             "response": _post_json(api_url, result["payload"]),
         }
+        if args.upload_oss:
+            response = result["execution"].get("response", {})
+            video_url = response.get("video_url")
+            if video_url and '/api/files/' in video_url:
+                relative = video_url.split('/api/files/', 1)[1]
+                candidate_paths = [
+                    _project_root / 'output' / relative,
+                    Path('/home/xvibe/.openclaw/workspace/Pixelle-Video') / 'output' / relative,
+                ]
+                for local_file in candidate_paths:
+                    if local_file.exists():
+                        result["execution"]["oss"] = upload_file_to_oss(local_file)
+                        break
 
     if args.pretty:
         print(json.dumps(result, ensure_ascii=False, indent=2))
