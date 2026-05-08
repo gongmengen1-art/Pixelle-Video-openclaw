@@ -52,3 +52,14 @@ python3 skills/video-edit-assistant/telegram_bridge_cli.py \
 ```
 
 后续继续补第二轮、第三轮 patch 即可；当必填信息齐全时，会自动执行，并且如果带上 `--upload-oss` 会直接返回 OSS 链接。
+
+如果你要更接近真实聊天消息处理，可以看：
+
+- `skills/video-edit-assistant/message_bridge.py`
+
+这个入口接收：
+- `user_key`
+- 原始文本消息（例如 `/video-edit 帮我做一个 30 秒竖屏产品介绍视频`）
+- 可选素材路径列表
+
+然后直接返回应该回复给用户的话，以及必要的执行结果。
