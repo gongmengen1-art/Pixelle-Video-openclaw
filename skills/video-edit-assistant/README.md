@@ -63,3 +63,12 @@ python3 skills/video-edit-assistant/telegram_bridge_cli.py \
 - 可选素材路径列表
 
 然后直接返回应该回复给用户的话，以及必要的执行结果。
+
+如果你想更接近真实聊天路由，可以使用：
+
+```bash
+python3 skills/video-edit-assistant/route_video_edit_message.py \
+  --user-key telegram-7217243523 \
+  --text '/video-edit 帮我做一个 30 秒竖屏产品介绍视频' \
+  --pretty
+```
