@@ -1,0 +1,22 @@
+{
+  "project_name": "",
+  "script_text": "",
+  "asset_paths": [],
+  "split_mode": "paragraph",
+  "duration_target": 30,
+  "skip_asset_analysis": true,
+  "tts_workflow": null,
+  "ref_audio": null,
+  "voice_id": "zh-CN-YunjianNeural",
+  "tts_speed": 1.0,
+  "subtitle_enabled": true,
+  "bgm_path": null,
+  "bgm_volume": 0.2,
+  "bgm_mode": "loop",
+  "pace": "medium",
+  "transition_style": "simple",
+  "editing_instruction": null,
+  "allow_asset_reuse": true,
+  "source": "selfhost",
+  "frame_template": "1080x1920/asset_default.html"
+}

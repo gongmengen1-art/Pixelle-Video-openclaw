@@ -38,6 +38,16 @@ https://github.com/user-attachments/assets/a42e7457-fcc8-40da-83fc-784c45a8b95d
 3. 用户可选提供 TTS / 声音克隆 / BGM / 剪辑说明
 4. 系统按结构化参数执行最小视频剪辑流程并输出 demo 视频
 
+### Skill 收集层（新增设计骨架）
+
+仓库已新增一个最小 skill 收集层设计骨架，位于：
+
+- `skills/video_edit_assistant_spec.md`
+- `skills/video_edit_request_draft.json`
+- `skills/video_edit_assistant_prompt.md`
+
+这些文件用于定义一个“对话式参数收集层”，让用户通过自然语言逐步提供文案、素材、TTS、BGM 和剪辑说明，再转交给 `scripted_asset_edit` API。
+
 ### 当前局限
 
 - `scripted_asset_edit` 目前仍是 MVP 骨架
