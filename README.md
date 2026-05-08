@@ -50,6 +50,18 @@ https://github.com/user-attachments/assets/a42e7457-fcc8-40da-83fc-784c45a8b95d
 
 另外，仓库已经补上第一版可复用的 intake 代码：
 
+仓库内还新增了一个可直接测试的 skill 目录：
+
+- `skills/video-edit-assistant/`
+
+其中包含：
+- `SKILL.md`
+- `README.md`
+- `run_skill.py`
+
+可以作为“仓库内安装版”的最小 skill 入口来实际测试。
+
+
 - `skills/video_edit_intake.py`：草稿合并、缺失项检测、默认值填充、payload 生成
 - `skills/video_edit_assistant_runtime.py`：会话运行时，负责返回当前 draft、缺失项、追问列表和最终 payload
 - `skills/video_edit_assistant_adapter.py`：无状态 adapter，便于被外部 agent/session 调用
