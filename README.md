@@ -52,6 +52,8 @@ https://github.com/user-attachments/assets/a42e7457-fcc8-40da-83fc-784c45a8b95d
 
 - `skills/video_edit_intake.py`：草稿合并、缺失项检测、默认值填充、payload 生成
 - `skills/video_edit_assistant_runtime.py`：会话运行时，负责返回当前 draft、缺失项、追问列表和最终 payload
+- `skills/video_edit_assistant_adapter.py`：无状态 adapter，便于被外部 agent/session 调用
+- `skills/video_edit_assistant_cli.py`：最小 CLI，可读取 draft/patch JSON 并输出当前 intake 结果
 - `skills/video_edit_runtime_example.py`：最小运行示例
 
 ### 当前局限
