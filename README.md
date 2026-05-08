@@ -48,6 +48,11 @@ https://github.com/user-attachments/assets/a42e7457-fcc8-40da-83fc-784c45a8b95d
 
 这些文件用于定义一个“对话式参数收集层”，让用户通过自然语言逐步提供文案、素材、TTS、BGM 和剪辑说明，再转交给 `scripted_asset_edit` API。
 
+另外，仓库已经补上第一版可复用的 intake 代码：
+
+- `skills/video_edit_intake.py`：草稿合并、缺失项检测、默认值填充、payload 生成
+- `skills/test_video_edit_intake.py`：最小单元测试示例
+
 ### 当前局限
 
 - `scripted_asset_edit` 目前仍是 MVP 骨架
