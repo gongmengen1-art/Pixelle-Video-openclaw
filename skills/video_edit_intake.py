@@ -152,10 +152,20 @@ MODE_FIELD_PROMPTS: dict[str, dict[str, str]] = {
     },
 }
 
+# Default aspect-ratio → template mapping (custom_assets / unknown mode)
 FRAME_TEMPLATE_BY_RATIO: dict[str, str] = {
     '9:16': '1080x1920/asset_default.html',
     '16:9': '1920x1080/image_full.html',
     '1:1':  '1080x1080/image_minimal_framed.html',
+}
+
+# Per-mode overrides — quick_create uses AI-image templates by default
+_MODE_RATIO_TO_TEMPLATE: dict[str | None, dict[str, str]] = {
+    MODE_QUICK_CREATE: {
+        '9:16': '1080x1920/image_default.html',
+        '16:9': '1920x1080/image_full.html',
+        '1:1':  '1080x1080/image_minimal_framed.html',
+    },
 }
 
 # Modes backed by a REST API (others need direct ComfyUI)
@@ -227,7 +237,9 @@ class IntakeState:
     def apply_aspect_ratio(self, ratio: str | None) -> str | None:
         if not ratio:
             return None
-        template = FRAME_TEMPLATE_BY_RATIO.get(ratio.strip())
+        mode = self.data.get('mode')
+        mapping = _MODE_RATIO_TO_TEMPLATE.get(mode, FRAME_TEMPLATE_BY_RATIO)
+        template = mapping.get(ratio.strip())
         if template:
             self.data['frame_template'] = template
         return template
@@ -296,6 +308,7 @@ class IntakeState:
 
         if mode == MODE_QUICK_CREATE:
             payload: dict[str, Any] = {
+                '_skill_mode':      MODE_QUICK_CREATE,   # routing hint, stripped before POST
                 'text':             d.get('text', ''),
                 'mode':             d.get('create_mode', 'generate'),
                 'title':            d.get('project_name') or None,

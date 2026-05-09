@@ -391,13 +391,14 @@ def build_patch_from_message(
     session_mode = (current_draft or {}).get('mode')
 
     # Check if this is a mode-selection reply (when mode was not yet chosen)
+    is_mode_selection = False
     if not session_mode:
         selected = _detect_mode_selection(content)
         if selected:
-            session_mode = selected
-        else:
-            detected = _detect_mode(content, media_paths)
-            session_mode = detected
+            # Pure mode-selection turn: only record mode, ask for content next
+            return {'mode': selected}
+        detected = _detect_mode(content, media_paths)
+        session_mode = detected
 
     # Build mode-specific patch
     if session_mode and session_mode in _PATCH_BUILDERS:
@@ -430,7 +431,11 @@ def _resolve_video_local_path(video_url: str, output_base: str) -> Path | None:
 
 def _execute_api(payload: dict, api_base: str, cfg: dict, upload_oss: bool) -> dict:
     import urllib.request
-    mode = payload.get('mode') or payload.get('_mode')
+    # _skill_mode carries the intake mode (quick_create / custom_assets / …)
+    # payload['mode'] may be overloaded with API-level fields (generate/fixed)
+    skill_mode = payload.get('_skill_mode') or payload.get('mode')
+
+    mode = skill_mode   # alias for readability below
 
     # Non-API-backed modes
     if mode not in _API_ROUTES:
@@ -441,8 +446,8 @@ def _execute_api(payload: dict, api_base: str, cfg: dict, upload_oss: bool) -> d
         }
 
     route = _API_ROUTES[mode]
-    # Remove internal fields before POST
-    clean = {k: v for k, v in payload.items() if not k.startswith('_') and k != 'mode'}
+    # Strip internal routing hints before POST
+    clean = {k: v for k, v in payload.items() if not k.startswith('_')}
 
     api_url = api_base.rstrip('/') + route
     req = urllib.request.Request(
@@ -451,8 +456,20 @@ def _execute_api(payload: dict, api_base: str, cfg: dict, upload_oss: bool) -> d
         headers={'Content-Type': 'application/json'},
         method='POST',
     )
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        response = json.loads(resp.read().decode('utf-8'))
+    try:
+        with urllib.request.urlopen(req, timeout=300) as resp:
+            response = json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode('utf-8', errors='replace')
+        try:
+            detail = json.loads(body).get('detail', body)
+        except Exception:
+            detail = body
+        return {
+            'status': 'api_error',
+            'http_status': exc.code,
+            'message': detail,
+        }
 
     result: dict[str, Any] = {'api_url': api_url, 'response': response}
 
@@ -516,9 +533,10 @@ def handle_video_edit_message(
         reply_text = '\n'.join(filter(None, lines))
     else:
         ex = result.execution or {}
-        # Non-API-backed mode message
         if ex.get('status') == 'unsupported':
             reply_text = ex.get('message', '此模式暂不支持。')
+        elif ex.get('status') == 'api_error':
+            reply_text = f"视频生成失败（HTTP {ex.get('http_status')}）：{ex.get('message', '未知错误')}"
         else:
             oss_url = (ex.get('oss') or {}).get('url')
             local_url = (ex.get('response') or {}).get('video_url')

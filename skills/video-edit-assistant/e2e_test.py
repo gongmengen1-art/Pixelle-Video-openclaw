@@ -47,6 +47,7 @@ if str(_skill_dir) not in sys.path:
 
 from skill_config import load_video_edit_config
 from message_bridge import handle_video_edit_message
+from session_bridge import VideoEditSessionBridge
 
 
 # ---------------------------------------------------------------------------
@@ -175,28 +176,208 @@ def test_multi_turn(cfg: dict, assets: list[str], script: str, upload_oss: bool)
 
 
 # ---------------------------------------------------------------------------
+# quick_create tests
+# ---------------------------------------------------------------------------
+
+def _seed_session(user_key: str, draft: dict) -> None:
+    """Pre-seed a session draft (used to inject test-specific overrides)."""
+    VideoEditSessionBridge().save_draft(user_key, draft)
+
+
+def test_quick_create_fixed(cfg: dict, script: str, upload_oss: bool, frame_template: str) -> bool:
+    """
+    快速制作 / fixed mode：用户提供固定文案，单轮完成。
+    使用 static 模板避免 ComfyUI 依赖。
+    """
+    print("\n\n══════════════════════════════════════════════════════════")
+    print("  TEST: 快速制作 — 固定文案 (fixed mode, static template)")
+    print("══════════════════════════════════════════════════════════")
+
+    user_key = f"e2e_qc_fixed_{int(time.time())}"
+
+    # Pre-seed: mode=quick_create + static frame_template (no ComfyUI needed)
+    _seed_session(user_key, {
+        'mode': 'quick_create',
+        'frame_template': frame_template,
+    })
+
+    text = f"/video-edit 快速制作 固定文案：{script} 竖屏"
+    result = _run_turn(user_key, text, None, cfg['api_base'], upload_oss)
+    _print_turn("Turn 1 — 固定文案 + 竖屏", result)
+
+    if result['state'] == 'executed':
+        ex = result.get('execution') or {}
+        if ex.get('status') == 'unsupported':
+            print(f"\n  [SKIP] {ex.get('message')}")
+            return True
+        if ex.get('status') == 'api_error':
+            msg = ex.get('message', '')
+            if 'api_key' in msg.lower() or '401' in msg or 'llm' in msg.lower():
+                print(f"\n  [SKIP] LLM 未配置，quick_create 需要真实 LLM key")
+                print(f"         配置方法: config.yaml → llm.api_key / llm.base_url / llm.model")
+                print(f"         错误详情: {msg[:120]}")
+                return True   # config missing is not a skill bug
+            print(f"\n  [FAIL] API error {ex.get('http_status')}: {msg[:120]}")
+            return False
+        print("\n  [PASS] executed in 1 turn")
+        return True
+
+    # Still collecting — reveal what's missing
+    draft = result.get('draft') or {}
+    missing = [k for k, v in draft.items() if v in (None, '', [], {})]
+    print(f"\n  [INFO] still collecting — missing: {missing}")
+
+    # Turn 2: confirm to proceed with current draft
+    result2 = _run_turn(user_key, "可以了，开始生成", None, cfg['api_base'], upload_oss)
+    _print_turn("Turn 2 — confirm", result2)
+
+    if result2['state'] == 'executed':
+        print("\n  [PASS] executed in 2 turns")
+        return True
+
+    print(f"\n  [FAIL] not executed after 2 turns")
+    return False
+
+
+def test_quick_create_multi_turn(cfg: dict, script: str, upload_oss: bool, frame_template: str) -> bool:
+    """
+    快速制作 / 多轮：先触发模式选择，再逐步补充主题和画幅。
+    """
+    print("\n\n══════════════════════════════════════════════════════════")
+    print("  TEST: 快速制作 — 多轮对话（模式选择 → 主题 → 画幅）")
+    print("══════════════════════════════════════════════════════════")
+
+    user_key = f"e2e_qc_multi_{int(time.time())}"
+
+    # Turn 1: ambiguous trigger → expect mode selection prompt
+    r1 = _run_turn(user_key, "/video-edit 帮我做个视频", None, cfg['api_base'], False)
+    _print_turn("Turn 1 — 模糊触发", r1)
+    assert r1['state'] == 'collecting', f"Expected collecting, got {r1['state']}"
+
+    # Turn 2: select mode 1 (快速制作)
+    r2 = _run_turn(user_key, "1", None, cfg['api_base'], False)
+    _print_turn("Turn 2 — 选择模式 1（快速制作）", r2)
+    assert r2['state'] == 'collecting', f"Expected collecting after mode select"
+    mode_in_draft = (r2.get('draft') or {}).get('mode')
+    assert mode_in_draft == 'quick_create', f"Expected mode=quick_create, got {mode_in_draft}"
+    print(f"  [OK] mode confirmed: {mode_in_draft}")
+
+    # Inject static template to avoid ComfyUI dependency
+    draft = r2.get('draft') or {}
+    draft['frame_template'] = frame_template
+    VideoEditSessionBridge().save_draft(user_key, draft)
+
+    # Turn 3: provide script (fixed mode) + orientation → should execute
+    r3 = _run_turn(
+        user_key,
+        f"固定文案：{script} 竖屏",
+        None, cfg['api_base'], upload_oss,
+    )
+    _print_turn("Turn 3 — 固定文案 + 竖屏 → 执行", r3)
+
+    if r3['state'] == 'executed':
+        print("\n  [PASS] executed in 3 turns")
+        return True
+
+    print(f"\n  [WARN] not executed after 3 turns — draft: {r3.get('draft')}")
+    return False
+
+
+# ---------------------------------------------------------------------------
+# custom_assets tests (existing, kept for regression)
+# ---------------------------------------------------------------------------
+
+def test_single_turn(cfg: dict, assets: list[str], script: str, upload_oss: bool) -> bool:
+    """自定义素材 — 单轮（所有必填信息一次发送）。"""
+    print("\n\n══════════════════════════════════════════════════════════")
+    print("  TEST: 自定义素材 — 单轮")
+    print("══════════════════════════════════════════════════════════")
+
+    user_key = f"e2e_single_{int(time.time())}"
+    text = f"/video-edit 文案：{script} 竖屏"
+
+    result = _run_turn(user_key, text, assets, cfg['api_base'], upload_oss)
+    _print_turn("Turn 1 — 文案 + 素材 + 竖屏", result)
+
+    if result['state'] == 'executed':
+        print("\n  [PASS] executed in 1 turn")
+        return True
+
+    print("\n  [INFO] still collecting, sending confirmation turn …")
+    result2 = _run_turn(user_key, "就用这些", None, cfg['api_base'], upload_oss)
+    _print_turn("Turn 2 — confirm", result2)
+
+    if result2['state'] == 'executed':
+        print("\n  [PASS] executed in 2 turns")
+        return True
+
+    print(f"\n  [WARN] not executed after 2 turns")
+    return False
+
+
+def test_multi_turn(cfg: dict, assets: list[str], script: str, upload_oss: bool) -> bool:
+    """自定义素材 — 3 轮对话。"""
+    print("\n\n══════════════════════════════════════════════════════════")
+    print("  TEST: 自定义素材 — 多轮（3 轮）")
+    print("══════════════════════════════════════════════════════════")
+
+    user_key = f"e2e_multi_{int(time.time())}"
+
+    r1 = _run_turn(user_key, "/video-edit 帮我做个视频", None, cfg['api_base'], False)
+    _print_turn("Turn 1 — 模糊触发", r1)
+    if r1['state'] != 'collecting':
+        print(f"\n  [FAIL] expected collecting on turn 1, got: {r1['state']}")
+        return False
+
+    # Select mode 2 (custom_assets)
+    r_mode = _run_turn(user_key, "2", None, cfg['api_base'], False)
+    _print_turn("Turn 1b — 选择模式 2（自定义素材）", r_mode)
+
+    r2 = _run_turn(user_key, f"竖屏，文案：{script}", None, cfg['api_base'], False)
+    _print_turn("Turn 2 — 文案 + 竖屏", r2)
+    if r2['state'] != 'collecting':
+        print(f"\n  [FAIL] expected collecting on turn 2, got: {r2['state']}")
+        return False
+
+    r3 = _run_turn(user_key, "素材发你", assets, cfg['api_base'], upload_oss)
+    _print_turn("Turn 3 — 素材（触发执行）", r3)
+
+    if r3['state'] == 'executed':
+        print("\n  [PASS] executed in 3 turns")
+        return True
+
+    print(f"\n  [WARN] not executed after 3 turns")
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description='E2E integration test for video-edit skill',
+        description='E2E integration test for video-edit skill (all modes)',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument('--asset', action='append', required=True, metavar='PATH',
-                        help='Local asset path (image or video). Repeat for multiple files.')
+    parser.add_argument('--asset', action='append', default=[], metavar='PATH',
+                        help='Asset path for custom_assets tests (can repeat)')
     parser.add_argument('--text', default='这是一款功能强大的产品，使用简单，欢迎体验。',
-                        help='Script text for the test video (default: generic placeholder)')
-    parser.add_argument('--mode', choices=['single', 'multi', 'both'], default='single',
-                        help='Test mode: single-turn, multi-turn, or both (default: single)')
-    parser.add_argument('--no-oss', action='store_true',
-                        help='Skip OSS upload step')
-    parser.add_argument('--api-base', default=None,
-                        help='Override api_base from config.yaml')
+                        help='Script text')
+    parser.add_argument('--skill-mode',
+                        choices=['quick_create', 'custom_assets', 'all'],
+                        default='quick_create',
+                        help='Which skill mode to test (default: quick_create)')
+    parser.add_argument('--multi', action='store_true',
+                        help='Also run multi-turn test (default: single-turn only)')
+    parser.add_argument('--no-oss', action='store_true', help='Skip OSS upload')
+    parser.add_argument('--api-base', default=None, help='Override api_base')
+    parser.add_argument('--frame-template',
+                        default='1080x1920/static_default.html',
+                        help='Frame template for quick_create (default: static, no ComfyUI)')
     args = parser.parse_args()
 
-    # ── Load config ──────────────────────────────────────────────────────────
+    # ── Config ───────────────────────────────────────────────────────────────
     cfg = load_video_edit_config()
     if args.api_base:
         cfg['api_base'] = args.api_base
@@ -209,14 +390,12 @@ def main() -> int:
     )
 
     print("Config:")
-    print(f"  api_base    : {cfg['api_base']}")
-    print(f"  session_dir : {cfg['session_dir']}")
-    print(f"  output_base : {cfg['output_base']}")
-    print(f"  default_bgm : {cfg['default_bgm']}")
-    print(f"  oss bucket  : {oss_cfg.get('bucket') or '(not set — OSS upload disabled)'}")
-    print(f"  upload_oss  : {upload_oss}")
+    print(f"  api_base       : {cfg['api_base']}")
+    print(f"  oss bucket     : {oss_cfg.get('bucket') or '(not set)'}")
+    print(f"  upload_oss     : {upload_oss}")
+    print(f"  frame_template : {args.frame_template}")
 
-    # ── Validate assets ───────────────────────────────────────────────────────
+    # ── Validate assets (only needed for custom_assets tests) ─────────────────
     assets: list[str] = []
     for raw in args.asset:
         p = Path(raw)
@@ -224,27 +403,37 @@ def main() -> int:
             print(f"\n[ERROR] Asset not found: {raw}")
             return 1
         assets.append(str(p.resolve()))
-    print(f"\nTest assets ({len(assets)}):")
-    for a in assets:
-        print(f"  {a}")
 
     # ── API health ────────────────────────────────────────────────────────────
     print(f"\nChecking API at {cfg['api_base']} …")
     if not _check_api(cfg['api_base']):
-        print("[ERROR] API unreachable. Start it with:")
-        print(f"  cd {_project_root}")
-        print("  uv run python api/app.py")
+        print("[ERROR] API unreachable. Start with:  uv run python api/app.py")
         return 1
     print("[OK] API is healthy")
 
     # ── Run tests ─────────────────────────────────────────────────────────────
     results: list[bool] = []
 
-    if args.mode in ('single', 'both'):
-        results.append(test_single_turn(cfg, assets, args.text, upload_oss))
+    if args.skill_mode in ('quick_create', 'all'):
+        results.append(
+            test_quick_create_fixed(cfg, args.text, upload_oss, args.frame_template)
+        )
+        if args.multi:
+            results.append(
+                test_quick_create_multi_turn(cfg, args.text, upload_oss, args.frame_template)
+            )
 
-    if args.mode in ('multi', 'both'):
-        results.append(test_multi_turn(cfg, assets, args.text, upload_oss))
+    if args.skill_mode in ('custom_assets', 'all'):
+        if not assets:
+            print("\n[WARN] --asset not provided, skipping custom_assets tests")
+        else:
+            results.append(test_single_turn(cfg, assets, args.text, upload_oss))
+            if args.multi:
+                results.append(test_multi_turn(cfg, assets, args.text, upload_oss))
+
+    if not results:
+        print("\n[WARN] No tests ran")
+        return 0
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print("\n\n══════════════════════════════════════════════════════════")
