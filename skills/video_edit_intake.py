@@ -12,7 +12,7 @@ MODE_IMAGE_TO_VIDEO  = 'image_to_video'
 MODE_ACTION_TRANSFER = 'action_transfer'
 
 MODE_LABELS: dict[str, str] = {
-    MODE_QUICK_CREATE:    '⚡ 快速制作（给主题，AI 全自动生成文案和配图）',
+    MODE_QUICK_CREATE:    '⚡ 快速制作（给主题，AI 生成文案 + TTS 配音）',
     MODE_CUSTOM_ASSETS:   '🎨 自定义素材（你提供文案和图片/视频素材）',
     MODE_DIGITAL_HUMAN:   '🤖 数字人口播（上传形象图，AI 合成口播视频）',
     MODE_IMAGE_TO_VIDEO:  '🎥 图生视频（上传图片，AI 生成动态视频）',
@@ -40,6 +40,7 @@ MODE_DEFAULTS: dict[str | None, dict[str, Any]] = {
     MODE_QUICK_CREATE: {
         **_SHARED_DEFAULTS,
         'mode':           MODE_QUICK_CREATE,
+        'frame_template': '1080x1920/static_default.html',   # static: no image generation needed
         'text':           '',
         'create_mode':    'generate',   # 'generate' | 'fixed'
         'n_scenes':       5,
@@ -117,8 +118,9 @@ _MODE_SELECT_PROMPT = (
 MODE_FIELD_PROMPTS: dict[str, dict[str, str]] = {
     MODE_QUICK_CREATE: {
         'text': (
-            '请告诉我视频主题，AI 来帮你生成文案和配图（如"如何提升工作效率"）。\n'
-            '如果你已有文案，发给我并加上"固定文案："前缀。'
+            '请告诉我视频主题，AI 会自动生成文案和配音（如"如何提升工作效率"）。\n'
+            '如果你已有文案，发给我并加上"固定文案："前缀。\n'
+            '注：AI 配图功能暂未开放，视频将使用纯文字排版样式。'
         ),
         'frame_template': '你要竖屏（9:16）、横屏（16:9）还是方形（1:1）？',
         'n_scenes':       '视频分几个场景？默认 5 个，可以说"3 个场景"。',
@@ -159,12 +161,14 @@ FRAME_TEMPLATE_BY_RATIO: dict[str, str] = {
     '1:1':  '1080x1080/image_minimal_framed.html',
 }
 
-# Per-mode overrides — quick_create uses AI-image templates by default
+# Per-mode aspect-ratio → template overrides.
+# quick_create defaults to static templates (no image generation required).
+# Switch to image_* templates once RunningHub / ComfyUI is configured.
 _MODE_RATIO_TO_TEMPLATE: dict[str | None, dict[str, str]] = {
     MODE_QUICK_CREATE: {
-        '9:16': '1080x1920/image_default.html',
-        '16:9': '1920x1080/image_full.html',
-        '1:1':  '1080x1080/image_minimal_framed.html',
+        '9:16': '1080x1920/static_default.html',
+        '16:9': '1080x1920/static_default.html',  # no 16:9 static template yet; fall back
+        '1:1':  '1080x1920/static_default.html',  # no 1:1 static template yet; fall back
     },
 }
 

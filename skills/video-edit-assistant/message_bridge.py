@@ -98,7 +98,14 @@ _INSTRUCTION_TOKENS = (
     '快节奏', '慢节奏', '节奏快', '节奏慢', '节奏感强', '紧凑', '舒缓', '轻松',
     '淡入淡出', '溶解', '渐变', '滑动', '推拉', '无转场', '硬切', '直切',
     '无字幕', '不加字幕', '不要字幕', '去掉字幕', '加字幕', '带字幕',
+    # image-generation keywords (longer forms first to avoid partial removal)
+    '要AI配图', '要AI生图', 'AI配图', 'AI生图', 'AI 生图', '生成图片', 'AI图片', '图片生成', '要配图',
+    # mode trigger words (should not appear in topic text)
+    '快速制作', '快速生成', '自定义素材', '图生视频', '动作迁移', '数字人口播',
 )
+
+# Aspect-ratio tokens to strip from topic fallback
+_ASPECT_TOKENS = ('竖屏', '横屏', '方形', '9:16', '16:9', '1:1')
 
 
 def _parse_sections(content: str) -> dict[str, str]:
@@ -218,18 +225,35 @@ def _get_cfg() -> dict:
 
 # ── Per-mode patch builders ─────────────────────────────────────────────────
 
+_IMAGE_GEN_KEYWORDS = ('配图', 'AI生图', 'AI 生图', '生成图片', 'AI图片', '图片生成', 'AI配图')
+
+
 def _patch_quick_create(content: str, sections: dict, media_paths: list[str] | None, cfg: dict) -> dict:
     patch: dict[str, Any] = {'mode': MODE_QUICK_CREATE}
 
+    # Detect explicit image-generation request → inject notice (not a patch field)
+    if any(k in content for k in _IMAGE_GEN_KEYWORDS):
+        patch['_notice'] = 'AI 配图功能暂未开放，视频将使用纯文字排版样式生成。配图功能上线后无需修改任何参数即可自动启用。'
+
     if 'text' in sections and sections['text']:
-        patch['text'] = _clean_script(sections['text'])
+        topic = _clean_script(sections['text'])
+        for tok in _ASPECT_TOKENS:
+            topic = topic.replace(tok, '')
+        topic = re.sub(r'[ \t]{2,}', ' ', topic).strip()
+        if topic:
+            patch['text'] = topic
     elif 'script_text' in sections and sections['script_text']:
         # User said "固定文案：..." → fixed mode
         patch['text'] = _clean_script(sections['script_text'])
         patch['create_mode'] = 'fixed'
     elif content and not any(m in content for _, ms in _SECTION_MARKERS for m in ms):
-        # Plain topic text (no markers) → clean and use as topic
-        patch['text'] = _clean_script(content)[:200]
+        # Plain topic text (no markers) → strip mode/aspect tokens then use as topic
+        topic = _clean_script(content)
+        for tok in _ASPECT_TOKENS:
+            topic = topic.replace(tok, '')
+        topic = re.sub(r'[ \t]{2,}', ' ', topic).strip()
+        if topic:
+            patch['text'] = topic[:200]
 
     if 'project_name' in sections:
         patch['project_name'] = sections['project_name'][:80]
@@ -393,13 +417,20 @@ def build_patch_from_message(
 
     session_mode = (current_draft or {}).get('mode')
 
-    # Check if this is a mode-selection reply (when mode was not yet chosen)
-    is_mode_selection = False
+    # Check if this is a pure mode-selection reply (when mode was not yet chosen).
+    # Treat as pure selection only when the message has NO additional content:
+    # no field sections, no media, no aspect-ratio signal, and short text.
     if not session_mode:
-        selected = _detect_mode_selection(content)
-        if selected:
-            # Pure mode-selection turn: only record mode, ask for content next
-            return {'mode': selected}
+        has_field_content = (
+            bool(sections)
+            or bool(media_paths)
+            or bool(aspect_ratio)
+            or len(content) > 10
+        )
+        if not has_field_content:
+            selected = _detect_mode_selection(content)
+            if selected:
+                return {'mode': selected}
         detected = _detect_mode(content, media_paths)
         session_mode = detected
 
@@ -517,6 +548,7 @@ def handle_video_edit_message(
 
     patch = build_patch_from_message(text, media_paths=media_paths, current_draft=current_draft)
     aspect_ratio = patch.pop('_aspect_ratio', None) or _extract_aspect_ratio(text)
+    notice = patch.pop('_notice', None)
 
     def execute_func(payload: dict) -> dict:
         return _execute_api(payload, resolved_api_base, cfg, upload_oss)
@@ -539,6 +571,8 @@ def handle_video_edit_message(
             lines = [result.summary] + [
                 f'{i+1}. {q["prompt"]}' for i, q in enumerate(result.questions)
             ]
+        if notice:
+            lines.insert(1, f'⚠️ {notice}')
         reply_text = '\n'.join(filter(None, lines))
     else:
         ex = result.execution or {}
