@@ -3,7 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from skills.video_edit_intake import IntakeState, create_intake_state
+from skills.video_edit_intake import (
+    IntakeState,
+    MODE_LABELS,
+    API_BACKED_MODES,
+    create_intake_state,
+)
 
 
 @dataclass
@@ -30,25 +35,21 @@ class VideoEditAssistantRuntime:
         aspect_ratio: str | None = None,
         question_limit: int = 3,
     ) -> RuntimeResponse:
-        """
-        Merge a user-provided patch, optionally map aspect ratio, and return
-        the next runtime state.
-        """
         if patch:
             self.state.merge(patch)
         if aspect_ratio:
             self.state.apply_aspect_ratio(aspect_ratio)
 
-        ready = self.state.ready()
-        missing_required = self.state.missing_required_fields()
+        ready             = self.state.ready()
+        missing_required  = self.state.missing_required_fields()
         missing_recommended = self.state.missing_recommended_fields()
-        questions = [] if ready else self.state.next_questions(limit=question_limit)
-        payload = self.state.build_api_payload() if ready else None
-        summary = self._build_summary(ready, missing_required, questions)
+        questions         = [] if ready else self.state.next_questions(limit=question_limit)
+        payload           = self.state.build_api_payload() if ready else None
+        summary           = self._build_summary(ready, missing_required, questions)
 
         return RuntimeResponse(
             ready=ready,
-            draft=self.state.build_api_payload(),
+            draft=self.state.data,
             missing_required=missing_required,
             missing_recommended=missing_recommended,
             questions=questions,
@@ -62,17 +63,23 @@ class VideoEditAssistantRuntime:
         missing_required: list[str],
         questions: list[dict[str, str]],
     ) -> str:
+        mode = self.state.current_mode()
+        mode_label = MODE_LABELS.get(mode, '') if mode else ''
+
+        if not mode:
+            return '请先选择创作模式。'
+
+        if mode not in API_BACKED_MODES:
+            return f'📋 {mode_label}\n此模式需要 ComfyUI 支持，功能即将上线。'
+
         if ready:
-            return "信息已齐，可以直接调用 /api/video/scripted-asset-edit/sync 生成 demo 视频。"
+            return f'✅ {mode_label} — 信息已齐，开始生成视频…'
 
         if missing_required:
-            joined = "、".join(missing_required)
-            return f"还缺这些关键项：{joined}。"
+            joined = '、'.join(missing_required)
+            return f'📋 {mode_label}\n还缺这些关键项：{joined}。'
 
-        if questions:
-            return "基础信息已齐，如果你愿意，我还可以继续补齐推荐项。"
-
-        return "当前草稿已更新。"
+        return f'📋 {mode_label} — 基础信息已齐，以下推荐项可按需补充。'
 
 
 def create_runtime(initial_draft: dict[str, Any] | None = None) -> VideoEditAssistantRuntime:

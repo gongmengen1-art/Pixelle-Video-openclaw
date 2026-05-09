@@ -3,64 +3,213 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any
 
-DEFAULT_REQUEST_DRAFT: dict[str, Any] = {
-    "project_name": "",
-    "script_text": "",
-    "asset_paths": [],
-    "split_mode": "paragraph",
-    "duration_target": 30,
-    "skip_asset_analysis": True,
-    "tts_workflow": None,
-    "ref_audio": None,
-    "voice_id": "zh-CN-YunjianNeural",
-    "tts_speed": 1.0,
-    "subtitle_enabled": True,
-    "bgm_path": None,
-    "bgm_volume": 0.2,
-    "bgm_mode": "loop",
-    "pace": "medium",
-    "transition_style": "simple",
-    "editing_instruction": None,
-    "allow_asset_reuse": True,
-    "source": "selfhost",
-    "frame_template": "1080x1920/asset_default.html",
+# ── Mode constants ───────────────────────────────────────────────────────────
+
+MODE_QUICK_CREATE    = 'quick_create'
+MODE_CUSTOM_ASSETS   = 'custom_assets'
+MODE_DIGITAL_HUMAN   = 'digital_human'
+MODE_IMAGE_TO_VIDEO  = 'image_to_video'
+MODE_ACTION_TRANSFER = 'action_transfer'
+
+MODE_LABELS: dict[str, str] = {
+    MODE_QUICK_CREATE:    '⚡ 快速制作（给主题，AI 全自动生成文案和配图）',
+    MODE_CUSTOM_ASSETS:   '🎨 自定义素材（你提供文案和图片/视频素材）',
+    MODE_DIGITAL_HUMAN:   '🤖 数字人口播（上传形象图，AI 合成口播视频）',
+    MODE_IMAGE_TO_VIDEO:  '🎥 图生视频（上传图片，AI 生成动态视频）',
+    MODE_ACTION_TRANSFER: '💃 动作迁移（上传参考动作视频 + 目标图片）',
 }
 
-REQUIRED_FIELDS = ["script_text", "asset_paths", "frame_template"]
+# ── Default draft per mode ───────────────────────────────────────────────────
 
-FIELD_PROMPTS: dict[str, str] = {
-    "script_text": "请把完整文案直接发我，我会按段落或句子帮你拆成视频场景。",
-    "asset_paths": "请把要参与剪辑的图片或视频素材发我；如果是多个文件，我会按顺序或后续规则匹配到文案场景。",
-    "frame_template": "你要竖屏、横屏还是方形？如果你不指定，我默认先用竖屏 9:16 模板。",
-    "tts_workflow": "你要用默认音色，还是指定一个 TTS 工作流？",
-    "ref_audio": "如果你想做声音克隆，请发一段 mp3/wav 参考音频。",
-    "bgm_path": "如果你要背景音乐，请发一个音频文件，或者告诉我直接用默认 BGM。",
-    "editing_instruction": "如果你对节奏、转场、重点表达有要求，可以直接告诉我，比如“前3秒抓人，结尾落品牌”。",
+_SHARED_DEFAULTS: dict[str, Any] = {
+    'mode':            None,
+    'project_name':    '',
+    'frame_template':  '1080x1920/asset_default.html',
+    'voice_id':        'zh-CN-YunjianNeural',
+    'tts_workflow':    None,
+    'ref_audio':       None,
+    'tts_speed':       1.0,
+    'subtitle_enabled': True,
+    'bgm_path':        None,
+    'bgm_volume':      0.2,
+    'bgm_mode':        'loop',
+    'source':          'selfhost',
 }
 
-FRAME_TEMPLATE_BY_RATIO = {
-    "9:16": "1080x1920/asset_default.html",
-    "16:9": "1920x1080/image_full.html",
-    "1:1": "1080x1080/image_minimal_framed.html",
+MODE_DEFAULTS: dict[str | None, dict[str, Any]] = {
+    MODE_QUICK_CREATE: {
+        **_SHARED_DEFAULTS,
+        'mode':           MODE_QUICK_CREATE,
+        'text':           '',
+        'create_mode':    'generate',   # 'generate' | 'fixed'
+        'n_scenes':       5,
+        'duration_target': 30,
+        'pace':           'medium',
+        'split_mode':     'paragraph',  # only used when create_mode=fixed
+    },
+    MODE_CUSTOM_ASSETS: {
+        **_SHARED_DEFAULTS,
+        'mode':                 MODE_CUSTOM_ASSETS,
+        'script_text':          '',
+        'asset_paths':          [],
+        'split_mode':           'paragraph',
+        'duration_target':      30,
+        'skip_asset_analysis':  True,
+        'allow_asset_reuse':    True,
+        'pace':                 'medium',
+        'transition_style':     'simple',
+        'editing_instruction':  None,
+    },
+    MODE_DIGITAL_HUMAN: {
+        **_SHARED_DEFAULTS,
+        'mode':         MODE_DIGITAL_HUMAN,
+        'asset_paths':  [],     # character image(s)
+        'text':         '',     # script for TTS
+        'audio_source': None,   # 'tts' | 'upload'
+        'dh_workflow':  None,
+    },
+    MODE_IMAGE_TO_VIDEO: {
+        **_SHARED_DEFAULTS,
+        'mode':         MODE_IMAGE_TO_VIDEO,
+        'asset_paths':  [],
+        'prompt':       '',
+        'i2v_workflow': None,
+    },
+    MODE_ACTION_TRANSFER: {
+        **_SHARED_DEFAULTS,
+        'mode':             MODE_ACTION_TRANSFER,
+        'reference_video':  None,
+        'target_image':     None,
+        'prompt':           '',
+        'af_workflow':      None,
+    },
 }
 
+# ── Required fields per mode ─────────────────────────────────────────────────
+
+MODE_REQUIRED_FIELDS: dict[str | None, list[str]] = {
+    None:                [],   # mode unknown — prompt for mode first
+    MODE_QUICK_CREATE:   ['text', 'frame_template'],
+    MODE_CUSTOM_ASSETS:  ['script_text', 'asset_paths', 'frame_template'],
+    MODE_DIGITAL_HUMAN:  ['asset_paths', 'audio_source'],
+    MODE_IMAGE_TO_VIDEO: ['asset_paths', 'prompt'],
+    MODE_ACTION_TRANSFER: ['reference_video', 'target_image', 'prompt'],
+}
+
+# ── Recommended (optional but nice-to-have) per mode ────────────────────────
+
+MODE_RECOMMENDED_FIELDS: dict[str | None, list[str]] = {
+    None:                [],
+    MODE_QUICK_CREATE:   ['tts_workflow', 'ref_audio', 'bgm_path'],
+    MODE_CUSTOM_ASSETS:  ['tts_workflow', 'ref_audio', 'bgm_path', 'editing_instruction'],
+    MODE_DIGITAL_HUMAN:  [],
+    MODE_IMAGE_TO_VIDEO: [],
+    MODE_ACTION_TRANSFER: [],
+}
+
+# ── Per-mode field prompts ───────────────────────────────────────────────────
+
+_MODE_SELECT_PROMPT = (
+    '请选择创作模式（回复序号或模式名）：\n'
+    + '\n'.join(f'  {i+1}. {label}' for i, label in enumerate(MODE_LABELS.values()))
+)
+
+MODE_FIELD_PROMPTS: dict[str, dict[str, str]] = {
+    MODE_QUICK_CREATE: {
+        'text': (
+            '请告诉我视频主题，AI 来帮你生成文案和配图（如"如何提升工作效率"）。\n'
+            '如果你已有文案，发给我并加上"固定文案："前缀。'
+        ),
+        'frame_template': '你要竖屏（9:16）、横屏（16:9）还是方形（1:1）？',
+        'n_scenes':       '视频分几个场景？默认 5 个，可以说"3 个场景"。',
+        'tts_workflow':   '你要用默认音色，还是指定一个 TTS 工作流？',
+        'ref_audio':      '如果你想声音克隆，请发一段 mp3/wav 参考音频；不需要就跳过。',
+        'bgm_path':       '要加背景音乐吗？说"默认 BGM"或发一个音频文件，不要就跳过。',
+    },
+    MODE_CUSTOM_ASSETS: {
+        'script_text':          '请把完整文案发给我，我会按段落或句子拆成视频场景。',
+        'asset_paths':          '请把图片或视频素材发给我；多个文件会按顺序匹配文案场景。',
+        'frame_template':       '你要竖屏（9:16）、横屏（16:9）还是方形（1:1）？',
+        'tts_workflow':         '你要用默认音色，还是指定一个 TTS 工作流？',
+        'ref_audio':            '如果你想声音克隆，请发一段 mp3/wav 参考音频；不需要就跳过。',
+        'bgm_path':             '要加背景音乐吗？说"默认 BGM"或发一个音频文件，不要就跳过。',
+        'editing_instruction':  '对节奏、转场或重点有特殊要求吗？（可选，不填跳过）',
+    },
+    MODE_DIGITAL_HUMAN: {
+        'asset_paths':  '请发一张数字人形象图（正面、清晰）。',
+        'audio_source': '口播音频来源：回复"TTS"用 AI 合成，或直接上传录音文件。',
+        'text':         '请输入口播文案，AI 来合成语音。',
+    },
+    MODE_IMAGE_TO_VIDEO: {
+        'asset_paths':   '请把要生成视频的图片发给我（支持多张）。',
+        'prompt':        '请描述图片如何动起来，例如"镜头缓缓推进，背景微风吹拂"。',
+        'i2v_workflow':  '使用哪个图生视频工作流？留空自动选择。',
+    },
+    MODE_ACTION_TRANSFER: {
+        'reference_video': '请发一段包含参考动作的视频（最长 30 秒）。',
+        'target_image':    '请发一张目标角色的图片，动作将迁移到这张图上。',
+        'prompt':          '请描述画面风格或补充说明（可选）。',
+    },
+}
+
+FRAME_TEMPLATE_BY_RATIO: dict[str, str] = {
+    '9:16': '1080x1920/asset_default.html',
+    '16:9': '1920x1080/image_full.html',
+    '1:1':  '1080x1080/image_minimal_framed.html',
+}
+
+# Modes backed by a REST API (others need direct ComfyUI)
+API_BACKED_MODES = {MODE_QUICK_CREATE, MODE_CUSTOM_ASSETS}
+
+
+# ── IntakeState ──────────────────────────────────────────────────────────────
 
 class IntakeState:
-    """Mutable draft state for the video edit assistant."""
+    """
+    Mutable draft state for the video edit assistant.
+    Mode-aware: required fields and payload format vary by mode.
+    """
 
     def __init__(self, draft: dict[str, Any] | None = None):
-        self.data: dict[str, Any] = deepcopy(DEFAULT_REQUEST_DRAFT)
+        self.data: dict[str, Any] = {'mode': None}
         if draft:
             self.merge(draft)
 
+    # ── Internal helpers ──────────────────────────────────────────────────
+
+    def _load_mode_defaults(self) -> None:
+        """Fill in mode-specific defaults (without overwriting existing values)."""
+        mode = self.data.get('mode')
+        if mode and mode in MODE_DEFAULTS:
+            for k, v in MODE_DEFAULTS[mode].items():
+                if k not in self.data:
+                    self.data[k] = deepcopy(v)
+
+    def _allowed_keys(self) -> set[str]:
+        mode = self.data.get('mode')
+        keys = set(self.data.keys()) | {'mode'}
+        if mode and mode in MODE_DEFAULTS:
+            keys |= set(MODE_DEFAULTS[mode].keys())
+        return keys
+
+    # ── Public API ────────────────────────────────────────────────────────
+
     def merge(self, patch: dict[str, Any]) -> dict[str, Any]:
-        """Merge a partial user-provided patch into the draft."""
+        """Merge a partial user patch into the draft."""
+        # Handle mode first so defaults are available for subsequent keys
+        if patch.get('mode'):
+            self.data['mode'] = patch['mode']
+            self._load_mode_defaults()
+
+        allowed = self._allowed_keys()
         for key, value in patch.items():
-            if key not in self.data:
+            if key == 'mode':
+                continue
+            if key not in allowed:
                 continue
             if value is None:
                 continue
-            if key == "asset_paths":
+            if key == 'asset_paths':
                 if isinstance(value, list):
                     cleaned = [str(v).strip() for v in value if str(v).strip()]
                     if cleaned:
@@ -70,24 +219,26 @@ class IntakeState:
                 continue
             if isinstance(value, str):
                 value = value.strip()
-                if value == "":
+                if value == '':
                     continue
             self.data[key] = value
         return self.data
 
     def apply_aspect_ratio(self, ratio: str | None) -> str | None:
-        """Map a simple aspect ratio value into a frame template."""
         if not ratio:
             return None
-        ratio = ratio.strip()
-        template = FRAME_TEMPLATE_BY_RATIO.get(ratio)
+        template = FRAME_TEMPLATE_BY_RATIO.get(ratio.strip())
         if template:
-            self.data["frame_template"] = template
+            self.data['frame_template'] = template
         return template
 
+    def current_mode(self) -> str | None:
+        return self.data.get('mode')
+
     def missing_required_fields(self) -> list[str]:
+        mode = self.data.get('mode')
         missing = []
-        for field in REQUIRED_FIELDS:
+        for field in MODE_REQUIRED_FIELDS.get(mode, []):
             value = self.data.get(field)
             if value is None:
                 missing.append(field)
@@ -98,18 +249,21 @@ class IntakeState:
         return missing
 
     def missing_recommended_fields(self) -> list[str]:
+        mode = self.data.get('mode')
         missing = []
-        recommended = ["tts_workflow", "ref_audio", "bgm_path", "editing_instruction"]
-        for field in recommended:
+        for field in MODE_RECOMMENDED_FIELDS.get(mode, []):
             value = self.data.get(field)
-            if value is None:
-                missing.append(field)
-            elif isinstance(value, str) and not value.strip():
+            if value is None or (isinstance(value, str) and not value.strip()):
                 missing.append(field)
         return missing
 
     def next_questions(self, limit: int = 3) -> list[dict[str, str]]:
-        """Return the next most important missing-field prompts."""
+        mode = self.data.get('mode')
+
+        # Mode not selected yet → ask first
+        if not mode:
+            return [{'field': 'mode', 'prompt': _MODE_SELECT_PROMPT}]
+
         fields = self.missing_required_fields()
         if len(fields) < limit:
             for field in self.missing_recommended_fields():
@@ -117,26 +271,84 @@ class IntakeState:
                     fields.append(field)
                 if len(fields) >= limit:
                     break
+
+        prompts = MODE_FIELD_PROMPTS.get(mode, {})
         return [
-            {"field": field, "prompt": FIELD_PROMPTS.get(field, f"请补充字段：{field}")}
-            for field in fields[:limit]
+            {'field': f, 'prompt': prompts.get(f, f'请补充：{f}')}
+            for f in fields[:limit]
         ]
 
     def ready(self) -> bool:
+        mode = self.data.get('mode')
+        if not mode:
+            return False
+        if mode not in API_BACKED_MODES:
+            return False   # ComfyUI modes not yet API-backed
         return len(self.missing_required_fields()) == 0
 
-    def build_api_payload(self) -> dict[str, Any]:
-        """Build a clean request payload for /api/video/scripted-asset-edit/sync."""
-        payload = deepcopy(self.data)
-        # Normalize empty optional strings to None
-        for key in ["project_name", "tts_workflow", "ref_audio", "bgm_path", "editing_instruction"]:
-            if isinstance(payload.get(key), str) and payload[key].strip() == "":
-                payload[key] = None
-        # Multiple assets with paragraph mode → switch to sentence so each
-        # asset gets at least one scene instead of all repeating the first.
-        asset_paths = payload.get("asset_paths", [])
-        if len(asset_paths) > 1 and payload.get("split_mode") == "paragraph":
-            payload["split_mode"] = "sentence"
+    def build_api_payload(self) -> dict[str, Any] | None:
+        """Build the API request payload based on the current mode."""
+        mode = self.data.get('mode')
+        if not mode:
+            return None
+
+        d = self.data
+
+        if mode == MODE_QUICK_CREATE:
+            payload: dict[str, Any] = {
+                'text':             d.get('text', ''),
+                'mode':             d.get('create_mode', 'generate'),
+                'title':            d.get('project_name') or None,
+                'n_scenes':         d.get('n_scenes', 5),
+                'frame_template':   d.get('frame_template'),
+                'voice_id':         d.get('voice_id'),
+                'tts_workflow':     d.get('tts_workflow'),
+                'ref_audio':        d.get('ref_audio'),
+                'tts_speed':        d.get('tts_speed', 1.0),
+                'bgm_path':         d.get('bgm_path'),
+                'bgm_volume':       d.get('bgm_volume', 0.2),
+                'bgm_mode':         d.get('bgm_mode', 'loop'),
+                'subtitle_enabled': d.get('subtitle_enabled', True),
+                'split_mode':       d.get('split_mode', 'paragraph'),
+            }
+
+        elif mode == MODE_CUSTOM_ASSETS:
+            payload = {
+                'script_text':         d.get('script_text', ''),
+                'asset_paths':         d.get('asset_paths', []),
+                'project_name':        d.get('project_name') or None,
+                'split_mode':          d.get('split_mode', 'paragraph'),
+                'duration_target':     d.get('duration_target', 30),
+                'skip_asset_analysis': d.get('skip_asset_analysis', True),
+                'allow_asset_reuse':   d.get('allow_asset_reuse', True),
+                'frame_template':      d.get('frame_template'),
+                'voice_id':            d.get('voice_id'),
+                'tts_workflow':        d.get('tts_workflow'),
+                'ref_audio':           d.get('ref_audio'),
+                'tts_speed':           d.get('tts_speed', 1.0),
+                'subtitle_enabled':    d.get('subtitle_enabled', True),
+                'bgm_path':            d.get('bgm_path'),
+                'bgm_volume':          d.get('bgm_volume', 0.2),
+                'bgm_mode':            d.get('bgm_mode', 'loop'),
+                'pace':                d.get('pace', 'medium'),
+                'transition_style':    d.get('transition_style', 'simple'),
+                'editing_instruction': d.get('editing_instruction'),
+                'source':              d.get('source', 'selfhost'),
+            }
+            # Multi-asset: sentence split ensures each asset gets a scene
+            if len(payload['asset_paths']) > 1 and payload['split_mode'] == 'paragraph':
+                payload['split_mode'] = 'sentence'
+
+        else:
+            return None   # ComfyUI modes not yet REST-backed
+
+        # Normalize empty strings → None for optional fields
+        optional = ['title', 'project_name', 'tts_workflow', 'ref_audio',
+                    'bgm_path', 'editing_instruction']
+        for k in optional:
+            if k in payload and isinstance(payload.get(k), str) and not payload[k].strip():
+                payload[k] = None
+
         return payload
 
 
