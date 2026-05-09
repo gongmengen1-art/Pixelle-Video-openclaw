@@ -368,12 +368,7 @@ class FrameProcessor:
                 audio=frame.audio_path,
                 output=output_path,
                 replace_audio=True,  # Replace video audio with narration
-                audio_volume=1.0,
-                # For scripted user-asset edits, preserving the provided video
-                # content is more important than matching narration duration.
-                # The merge layer will pad narration audio with silence if the
-                # video is longer instead of trimming the visual material.
-                auto_adjust_duration=not getattr(frame, "preserve_video_duration", False),
+                audio_volume=1.0
             )
             
             # Clean up temp file
@@ -449,3 +444,4 @@ class FrameProcessor:
             logger.warning(f"Failed to get video duration: {e}, using audio duration")
             # Fallback: use audio duration if available
             return 1.0  # Default to 1 second if unable to determine
+
