@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-DEFAULT_SESSION_DIR = Path('/home/xvibe/.openclaw/workspace/memory/video-edit-sessions')
+
+def _default_session_dir() -> Path:
+    try:
+        from skill_config import load_video_edit_config
+        return Path(load_video_edit_config()['session_dir'])
+    except Exception:
+        return Path.home() / '.openclaw/workspace/memory/video-edit-sessions'
 
 
 @dataclass
@@ -20,8 +26,8 @@ class SessionResult:
 
 
 class VideoEditSessionBridge:
-    def __init__(self, session_dir: str | Path = DEFAULT_SESSION_DIR):
-        self.session_dir = Path(session_dir)
+    def __init__(self, session_dir: str | Path | None = None):
+        self.session_dir = Path(session_dir) if session_dir else _default_session_dir()
         self.session_dir.mkdir(parents=True, exist_ok=True)
 
     def _session_path(self, user_key: str) -> Path:

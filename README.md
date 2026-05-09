@@ -18,62 +18,116 @@ https://github.com/user-attachments/assets/a42e7457-fcc8-40da-83fc-784c45a8b95d
 
 ## OpenClaw 二开说明
 
-这是一个基于上游 `AIDC-AI/Pixelle-Video` 的 OpenClaw 二开快照仓库，当前已新增一条用于 **“脚本 + 自带素材 + 对话式配置收集”** 的 demo 视频剪辑链路。
+这是一个基于上游 `AIDC-AI/Pixelle-Video` 的 OpenClaw 二开快照仓库，已在原框架基础上构建了一条完整的 **Telegram 对话式视频自动剪辑链路**：用户在 Telegram 多轮对话中提供文案和素材，系统自动剪辑并将成片上传至阿里云 OSS，最终返回公网可访问的视频链接。
 
-### 当前新增内容
+### 整体架构
 
-- 新增 pipeline：`pixelle_video/pipelines/scripted_asset_edit.py`
-- 新增 API schema：`api/schemas/video_edit.py`
-- 新增 API router：`api/routers/video_edit.py`
-- 已注册新 pipeline：`scripted_asset_edit`
-- 已新增同步接口：`POST /api/video/scripted-asset-edit/sync`
-- 支持最小验证模式：`skip_asset_analysis=true`，可跳过 ComfyUI/RunningHub 的素材语义分析，优先验证“提供文案 + 提供素材 + 模板渲染 + TTS + 合成”主链路
+```
+Telegram 用户
+  ↓ 发送 /video-edit 消息 + 图片/视频附件
+openclaw Bot（openclaw_router.py）
+  ↓ 下载附件 → 调用 skill CLI
+消息解析层（message_bridge.py）
+  ↓ 提取 aspect_ratio / duration / script / assets 等字段
+Session 状态机（session_bridge.py + video_edit_intake.py）
+  ↓ 多轮对话，缺失字段追问，信息齐全后触发执行
+Pixelle-Video API（POST /api/video/scripted-asset-edit/sync）
+  ↓ 文案拆分 → 素材映射 → edge-TTS → Playwright 渲染 → ffmpeg 合成
+阿里云 OSS（upload_to_oss.py）
+  ↓ 上传 → 返回公网 URL → 本地任务目录立即清理
+Telegram 用户收到视频链接
+```
 
-### 新接口用途
+### 新增文件索引
 
-该接口面向一个视频自动化剪辑 demo skill，目标流程是：
+#### Pipeline 与 API 层
 
-1. 用户直接提供文案
-2. 用户直接提供图片/视频素材
-3. 用户可选提供 TTS / 声音克隆 / BGM / 剪辑说明
-4. 系统按结构化参数执行最小视频剪辑流程并输出 demo 视频
+| 文件 | 说明 |
+|------|------|
+| `pixelle_video/pipelines/scripted_asset_edit.py` | 新增 pipeline，基于用户提供的文案+素材执行剪辑 |
+| `api/schemas/video_edit.py` | 请求/响应 Pydantic 模型 |
+| `api/routers/video_edit.py` | `POST /api/video/scripted-asset-edit/sync` 端点 |
 
-### Skill 收集层（新增设计骨架）
+#### Skill 收集层（`skills/`）
 
-仓库已新增一个最小 skill 收集层设计骨架，位于：
+| 文件 | 说明 |
+|------|------|
+| `skills/video_edit_intake.py` | 核心状态机：草稿合并、缺失项检测、payload 生成 |
+| `skills/video_edit_assistant_runtime.py` | 会话编排：返回当前 draft、缺失项、追问列表 |
+| `skills/video_edit_assistant_adapter.py` | 无状态 adapter，供外部 agent/session 调用 |
+| `skills/video_edit_assistant_cli.py` | 最小 CLI 入口 |
 
-- `skills/video_edit_assistant_spec.md`
-- `skills/video_edit_request_draft.json`
-- `skills/video_edit_assistant_prompt.md`
+#### openclaw Telegram 接入层（`skills/video-edit-assistant/`）
 
-这些文件用于定义一个“对话式参数收集层”，让用户通过自然语言逐步提供文案、素材、TTS、BGM 和剪辑说明，再转交给 `scripted_asset_edit` API。
+| 文件 | 说明 |
+|------|------|
+| `SKILL.md` | openclaw skill 元数据，含触发前缀和路由接入规范 |
+| `skill_config.py` | 从 `config.yaml` 读取 `video_edit` 节，统一配置入口 |
+| `message_bridge.py` | 消息解析：从自然语言提取 patch，驱动 session 状态机，触发 API 调用 |
+| `session_bridge.py` | 多轮会话持久化（JSON），每用户独立 session 文件 |
+| `upload_to_oss.py` | 阿里云 OSS 上传，优先读 config.yaml AK/SK，兼容 STS token |
+| `openclaw_router.py` | openclaw 接入层：Telegram 附件下载 + 同步/async 路由接口 |
+| `workspace_cleaner.py` | 工作区清理：OSS 上传后立即删除任务目录，支持定期全量清理 |
+| `route_video_edit_message.py` | CLI 路由入口，openclaw 直接调用的 shell 命令 |
+| `e2e_test.py` | 端到端集成测试脚本（单轮 + 多轮） |
+| `openclaw_integration_example.py` | openclaw Bot 接入代码示例（由安装脚本生成） |
 
-另外，仓库已经补上第一版可复用的 intake 代码：
+#### 部署
 
-仓库内还新增了一个可直接测试的 skill 目录：
+| 文件 | 说明 |
+|------|------|
+| `install.sh` | 一键安装脚本：依赖安装 + 交互式配置向导 + systemd 服务注册 + cron 清理任务 |
+| `config.example.yaml` | 配置模板，含 `video_edit` 节（OSS、清理策略等） |
 
-- `skills/video-edit-assistant/`
+### 一键部署
 
-其中包含：
-- `SKILL.md`
-- `README.md`
-- `run_skill.py`
+```bash
+git clone <this-repo> && cd Pixelle-Video-openclaw
+bash install.sh
+```
 
-可以作为“仓库内安装版”的最小 skill 入口来实际测试。
+脚本将交互式引导填写必填项（OSS AK/SK/Bucket），完成后自动：
+- 安装 uv / ffmpeg / Playwright Chromium
+- 注册 systemd 服务（Linux）并设为开机自启
+- 添加 crontab 每日清理任务
+- 运行 E2E 冒烟测试验证全链路
 
+### openclaw Bot 接入（两行代码）
 
-- `skills/video_edit_intake.py`：草稿合并、缺失项检测、默认值填充、payload 生成
-- `skills/video_edit_assistant_runtime.py`：会话运行时，负责返回当前 draft、缺失项、追问列表和最终 payload
-- `skills/video_edit_assistant_adapter.py`：无状态 adapter，便于被外部 agent/session 调用
-- `skills/video_edit_assistant_cli.py`：最小 CLI，可读取 draft/patch JSON 并输出当前 intake 结果
-- `skills/video_edit_runtime_example.py`：最小运行示例
+```python
+from skills.video-edit-assistant.openclaw_router import handle_telegram_update_async
 
-### 当前局限
+result = await handle_telegram_update_async(bot_token=BOT_TOKEN, update=update)
+if result:
+    await message.reply_text(result[“reply_text”])
+```
 
-- `scripted_asset_edit` 目前仍是 MVP 骨架
-- 当前文案拆分后默认按顺序映射素材，支持素材复用
-- `editing_instruction` / `pace` / `transition_style` 已接入参数层，但还没有完全转成精细剪辑规则
-- 返回结果中的 `duration` 仍建议后续改为用 `ffprobe` 对最终成片做真实探测
+触发前缀：`/video-edit`、`video-edit:`、`视频剪辑：`
+
+### 磁盘管理
+
+| 时机 | 行为 |
+|------|------|
+| OSS 上传成功后 | 立即删除 `output/{task_id}/` 全部文件（约 100–600KB/任务） |
+| Telegram 附件处理完 | 删除 `/tmp/tg_media_*` 临时文件 |
+| 每日 03:00 cron | 清理超过 24h 的残留任务目录 + 超过 7 天的 session 草稿 |
+
+手动触发全量清理：
+```bash
+uv run python3 skills/video-edit-assistant/workspace_cleaner.py --max-task-age-hours 24
+```
+
+### E2E 测试
+
+```bash
+# 验证 API 通路（不上传 OSS）
+uv run python3 skills/video-edit-assistant/e2e_test.py \
+  --asset /path/to/asset.jpg --no-oss
+
+# 完整链路（单轮 + 多轮，含 OSS）
+uv run python3 skills/video-edit-assistant/e2e_test.py \
+  --asset /path/to/asset.jpg --mode both
+```
 
 ### Demo 输出示例
 
