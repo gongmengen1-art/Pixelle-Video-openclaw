@@ -202,8 +202,6 @@ def _clean_script(text: str) -> str:
     # Remove standalone duration/scene-count patterns that are instructions, not narration
     text = re.sub(r'(?<!前)(?<!后)(?<!内)\d+\s*秒', '', text)
     text = re.sub(r'\d+\s*[个場场]场景', '', text)
-    # Common free-form note users append after a script block.
-    text = re.sub(r'\n?\s*素材我稍后发你\s*$', '', text)
     return re.sub(r'[ \t]{2,}', ' ', text).strip()
 
 
@@ -410,8 +408,7 @@ def build_patch_from_message(
     3. Dispatch to mode-specific patch builder
     """
     cfg = _get_cfg()
-    raw_text = (text or '').replace('\\n', '\n').strip()
-    content = _strip_trigger(raw_text)
+    content = _strip_trigger((text or '').strip())
     sections = _parse_sections(content)
     aspect_ratio = _extract_aspect_ratio(content)
 
@@ -515,15 +512,9 @@ def _execute_api(payload: dict, api_base: str, cfg: dict, upload_oss: bool) -> d
             task_id = local_file.parent.name
             oss_prefix = cfg.get('oss', {}).get('prefix', 'openclaw/video-edit/')
             object_key = f'{oss_prefix}{task_id}.mp4'
-            try:
-                result['oss'] = upload_file_to_oss(local_file, object_key=object_key)
-                if result['oss'].get('status') == 200:
-                    cleanup_task_dir(local_file.parent)
-            except Exception as exc:
-                # Video generation already succeeded. Surface the upload error
-                # without turning the whole chat workflow into a failure; this
-                # keeps a local fallback URL/path available to the user.
-                result['oss_error'] = str(exc)
+            result['oss'] = upload_file_to_oss(local_file, object_key=object_key)
+            if result['oss'].get('status') == 200:
+                cleanup_task_dir(local_file.parent)
         else:
             result['oss_skip_reason'] = f'local file not found for: {video_url}'
 
@@ -588,8 +579,6 @@ def handle_video_edit_message(
                 reply_text += f'\nOSS 链接：{oss_url}'
             elif local_url:
                 reply_text += f'\n本地链接：{local_url}'
-            if ex.get('oss_error'):
-                reply_text += f'\nOSS 上传失败：{ex["oss_error"]}'
 
     return {
         'state':        result.state,
