@@ -132,6 +132,11 @@ class IntakeState:
         for key in ["project_name", "tts_workflow", "ref_audio", "bgm_path", "editing_instruction"]:
             if isinstance(payload.get(key), str) and payload[key].strip() == "":
                 payload[key] = None
+        # Multiple assets with paragraph mode → switch to sentence so each
+        # asset gets at least one scene instead of all repeating the first.
+        asset_paths = payload.get("asset_paths", [])
+        if len(asset_paths) > 1 and payload.get("split_mode") == "paragraph":
+            payload["split_mode"] = "sentence"
         return payload
 
 
