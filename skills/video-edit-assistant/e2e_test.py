@@ -212,12 +212,23 @@ def test_quick_create_fixed(cfg: dict, script: str, upload_oss: bool, frame_temp
             return True
         if ex.get('status') == 'api_error':
             msg = ex.get('message', '')
-            if 'api_key' in msg.lower() or '401' in msg or 'llm' in msg.lower():
-                print(f"\n  [SKIP] LLM 未配置，quick_create 需要真实 LLM key")
-                print(f"         配置方法: config.yaml → llm.api_key / llm.base_url / llm.model")
-                print(f"         错误详情: {msg[:120]}")
-                return True   # config missing is not a skill bug
-            print(f"\n  [FAIL] API error {ex.get('http_status')}: {msg[:120]}")
+            http_status = ex.get('http_status', 0)
+            llm_config_errors = (
+                'api_key' in msg.lower()
+                or 'invalid_api_key' in msg
+                or 'insufficient_quota' in msg
+                or 'quota' in msg.lower()
+                or str(http_status) in ('401', '429')
+                or 'does not exist' in msg.lower()
+            )
+            if llm_config_errors:
+                print(f"\n  [SKIP] LLM 配置问题（HTTP {http_status}），quick_create 需要可用的 LLM")
+                print(f"         建议配置（免费/低成本）：")
+                print(f"           Qwen:     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1  model: qwen-plus")
+                print(f"           DeepSeek: base_url: https://api.deepseek.com  model: deepseek-chat")
+                print(f"         错误详情: {msg[:150]}")
+                return True
+            print(f"\n  [FAIL] API error {http_status}: {msg[:150]}")
             return False
         print("\n  [PASS] executed in 1 turn")
         return True
@@ -276,6 +287,16 @@ def test_quick_create_multi_turn(cfg: dict, script: str, upload_oss: bool, frame
     _print_turn("Turn 3 — 固定文案 + 竖屏 → 执行", r3)
 
     if r3['state'] == 'executed':
+        ex3 = r3.get('execution') or {}
+        if ex3.get('status') == 'api_error':
+            msg = ex3.get('message', '')
+            http_status = ex3.get('http_status', 0)
+            if any(k in msg for k in ('insufficient_quota', 'invalid_api_key', 'does not exist')) \
+               or str(http_status) in ('401', '429'):
+                print(f"\n  [SKIP] 多轮路由正确（3 轮），LLM 配置问题导致视频生成失败（HTTP {http_status}）")
+                return True
+            print(f"\n  [FAIL] API error in Turn 3: {msg[:120]}")
+            return False
         print("\n  [PASS] executed in 3 turns")
         return True
 
