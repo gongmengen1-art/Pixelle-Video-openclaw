@@ -213,19 +213,25 @@ def test_quick_create_fixed(cfg: dict, script: str, upload_oss: bool, frame_temp
         if ex.get('status') == 'api_error':
             msg = ex.get('message', '')
             http_status = ex.get('http_status', 0)
-            llm_config_errors = (
+            external_service_errors = (
                 'api_key' in msg.lower()
                 or 'invalid_api_key' in msg
                 or 'insufficient_quota' in msg
                 or 'quota' in msg.lower()
                 or str(http_status) in ('401', '429')
                 or 'does not exist' in msg.lower()
+                or 'runninghub api key' in msg.lower()
+                or 'comfyui' in msg.lower()
             )
-            if llm_config_errors:
-                print(f"\n  [SKIP] LLM 配置问题（HTTP {http_status}），quick_create 需要可用的 LLM")
-                print(f"         建议配置（免费/低成本）：")
-                print(f"           Qwen:     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1  model: qwen-plus")
-                print(f"           DeepSeek: base_url: https://api.deepseek.com  model: deepseek-chat")
+            if external_service_errors:
+                hint = ''
+                if 'runninghub' in msg.lower():
+                    hint = '         quick_create 生成配图需要 RunningHub key 或本地 ComfyUI\n         config.yaml → comfyui.runninghub_api_key'
+                elif 'api_key' in msg.lower() or 'quota' in msg.lower():
+                    hint = '         建议 LLM 配置：\n           DeepSeek: base_url: https://api.deepseek.com  model: deepseek-chat'
+                print(f"\n  [SKIP] 外部服务未配置（HTTP {http_status}）：skill 层路由与参数收集均正常")
+                if hint:
+                    print(hint)
                 print(f"         错误详情: {msg[:150]}")
                 return True
             print(f"\n  [FAIL] API error {http_status}: {msg[:150]}")
@@ -291,9 +297,11 @@ def test_quick_create_multi_turn(cfg: dict, script: str, upload_oss: bool, frame
         if ex3.get('status') == 'api_error':
             msg = ex3.get('message', '')
             http_status = ex3.get('http_status', 0)
-            if any(k in msg for k in ('insufficient_quota', 'invalid_api_key', 'does not exist')) \
+            if any(k in msg.lower() for k in ('insufficient_quota', 'invalid_api_key',
+                                           'does not exist', 'runninghub api key', 'comfyui')) \
                or str(http_status) in ('401', '429'):
-                print(f"\n  [SKIP] 多轮路由正确（3 轮），LLM 配置问题导致视频生成失败（HTTP {http_status}）")
+                print(f"\n  [SKIP] 多轮路由正确（3 轮），外部服务未配置导致视频生成失败（HTTP {http_status}）")
+                print(f"         错误详情: {msg[:120]}")
                 return True
             print(f"\n  [FAIL] API error in Turn 3: {msg[:120]}")
             return False
