@@ -745,7 +745,12 @@ class AssetBasedPipeline(LinearVideoPipeline):
         
         context.final_video_path = str(final_video_path)
         context.storyboard.final_video_path = str(final_video_path)
-        
+        try:
+            context.storyboard.total_duration = self.core.video._get_video_duration(str(final_video_path))
+        except Exception as e:
+            logger.warning(f"Failed to probe final video duration: {e}")
+            context.storyboard.total_duration = sum(frame.duration or 0 for frame in context.storyboard.frames)
+
         logger.success(f"✅ Final video: {final_video_path}")
         
         # Emit completion of concatenation

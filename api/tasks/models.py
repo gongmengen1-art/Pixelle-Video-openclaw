@@ -32,6 +32,7 @@ class TaskStatus(str, Enum):
 class TaskType(str, Enum):
     """Task type"""
     VIDEO_GENERATION = "video_generation"
+    VIDEO_EDIT = "video_edit"
 
 
 class TaskProgress(BaseModel):
@@ -67,4 +68,3 @@ class Task(BaseModel):
         json_encoders = {
             datetime: lambda v: v.isoformat()
         }
-

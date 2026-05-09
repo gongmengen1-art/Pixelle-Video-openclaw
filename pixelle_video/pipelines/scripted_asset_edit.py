@@ -21,6 +21,7 @@ front-end semantics from "generate a marketing video from intent" to
 
 from pathlib import Path
 from typing import Any, Optional, Callable
+import subprocess
 
 from loguru import logger
 from pydantic import BaseModel, Field
@@ -243,6 +244,17 @@ class ScriptedAssetEditPipeline(AssetBasedPipeline):
         if not asset_paths:
             raise ValueError("No analyzed assets available for scripted edit pipeline")
 
+        # For user-provided asset editing, coverage is more important than
+        # strictly following the script split. If a short script is provided
+        # with multiple assets, create at least one scene per asset so every
+        # video/photo makes it into the final cut.
+        if len(segments) < len(asset_paths):
+            segments = self._expand_segments_to_cover_assets(
+                segments=segments,
+                asset_paths=asset_paths,
+                editing_instruction=context.request.get("editing_instruction"),
+            )
+
         scenes = []
         for idx, segment in enumerate(segments, start=1):
             if idx - 1 < len(asset_paths):
@@ -252,13 +264,19 @@ class ScriptedAssetEditPipeline(AssetBasedPipeline):
             else:
                 asset_path = asset_paths[-1]
 
+            asset_metadata = self.asset_index.get(asset_path, {})
+            asset_duration = self._get_asset_duration(asset_path) if asset_metadata.get("type") == "video" else 0.0
+            estimated_script_duration = max(2, min(8, len(segment) // 12 or 3))
+
             scenes.append(
                 {
                     "scene_number": idx,
                     "script_segment": segment,
                     "asset_path": asset_path,
                     "narrations": [segment],
-                    "duration": max(2, min(8, len(segment) // 12 or 3)),
+                    # Duration is a floor, not a crop target: for video assets
+                    # we preserve at least the original material length.
+                    "duration": max(estimated_script_duration, int(asset_duration + 0.999)),
                     "transition": context.request.get("transition_style", "simple"),
                     "emphasis": None,
                 }
@@ -315,5 +333,50 @@ class ScriptedAssetEditPipeline(AssetBasedPipeline):
         # Ensure narration aligns with script_segment semantics.
         for frame, scene in zip(context.storyboard.frames, context.matched_scenes):
             frame.narration = " ".join(scene.get("narrations", []))
+            asset_path = scene.get("matched_asset") or scene.get("asset_path")
+            asset_metadata = self.asset_index.get(asset_path, {})
+            if asset_metadata.get("type") == "video":
+                # Downstream merge must not trim user videos to narration length.
+                frame.preserve_video_duration = True
 
         return context
+
+    def _expand_segments_to_cover_assets(
+        self,
+        *,
+        segments: list[str],
+        asset_paths: list[str],
+        editing_instruction: Optional[str] = None,
+    ) -> list[str]:
+        """Ensure every provided asset receives a scene, allowing copy tweaks."""
+        if not segments:
+            segments = ["画面自然展开，营造舒缓、宁静的观看氛围。"]
+
+        expanded = list(segments)
+        while len(expanded) < len(asset_paths):
+            asset_name = Path(asset_paths[len(expanded)]).stem
+            if editing_instruction:
+                expanded.append(f"随后镜头自然过渡，继续呈现{asset_name}的细节，让画面保持连贯舒缓。")
+            else:
+                expanded.append(f"随后镜头自然过渡，继续呈现{asset_name}的细节，与前一幕形成安静连贯的呼应。")
+        return expanded
+
+    def _get_asset_duration(self, asset_path: str) -> float:
+        """Return media duration in seconds; 0 for unknown/non-video files."""
+        try:
+            result = subprocess.run(
+                [
+                    "ffprobe",
+                    "-v", "error",
+                    "-show_entries", "format=duration",
+                    "-of", "default=noprint_wrappers=1:nokey=1",
+                    asset_path,
+                ],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            return max(0.0, float(result.stdout.strip()))
+        except Exception as e:
+            logger.warning(f"Failed to probe asset duration for {asset_path}: {e}")
+            return 0.0
