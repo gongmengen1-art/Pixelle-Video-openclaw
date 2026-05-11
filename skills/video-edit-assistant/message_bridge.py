@@ -527,6 +527,83 @@ def _execute_api(payload: dict, api_base: str, cfg: dict, upload_oss: bool) -> d
 
 # ── Main entry point ───────────────────────────────────────────────────────
 
+_VOICE_LABELS: dict[str, str] = {
+    'zh-CN-YunjianNeural':  '云健（男声，普通话）',
+    'zh-CN-XiaoxiaoNeural': '晓晓（女声，普通话）',
+    'zh-CN-XiaoyiNeural':   '晓依（女声，普通话）',
+    'zh-CN-YunxiNeural':    '云希（男声，普通话）',
+    'zh-CN-YunyangNeural':  '云扬（男声，新闻播音）',
+    'zh-CN-YunyeNeural':    '云野（男声，轻松）',
+    'zh-CN-YunfengNeural':  '云枫（男声，活泼）',
+}
+
+_TEMPLATE_LABELS: dict[str, str] = {
+    '1080x1920': '竖屏 9:16（1080×1920）',
+    '1920x1080': '横屏 16:9（1920×1080）',
+    '1080x1080': '方形 1:1（1080×1080）',
+}
+
+_PACE_LABELS   = {'fast': '快节奏', 'medium': '中等', 'slow': '舒缓'}
+_TRANS_LABELS  = {'simple': '简单', 'fade': '淡入淡出', 'slide': '滑动', 'cut': '硬切'}
+
+
+def _format_config_summary(draft: dict) -> str:
+    """
+    Format the current custom_assets draft as a human-readable config checklist.
+    Sent once when the user first enters custom_assets mode so they know what
+    defaults will be used and can declare overrides in conversation.
+    """
+    # ── 画幅 ──────────────────────────────────────────────────────────────
+    tmpl = draft.get('frame_template', '1080x1920/asset_default.html')
+    frame_label = '竖屏 9:16（1080×1920）'      # default
+    for prefix, label in _TEMPLATE_LABELS.items():
+        if prefix in tmpl:
+            frame_label = label
+            break
+
+    # ── 音色 ──────────────────────────────────────────────────────────────
+    voice = draft.get('voice_id', 'zh-CN-YunjianNeural')
+    voice_label = _VOICE_LABELS.get(voice, voice)
+
+    # ── 语速 ──────────────────────────────────────────────────────────────
+    speed = draft.get('tts_speed', 1.0)
+    speed_label = f'{speed}x（{"标准" if speed == 1.0 else "较快" if speed > 1.0 else "较慢"}）'
+
+    # ── 字幕 ──────────────────────────────────────────────────────────────
+    subtitle_label = '开启' if draft.get('subtitle_enabled', True) else '关闭'
+
+    # ── BGM ───────────────────────────────────────────────────────────────
+    bgm = draft.get('bgm_path')
+    if not bgm:
+        bgm_label = '无'
+    elif 'default' in str(bgm).lower():
+        bgm_label = '默认 BGM'
+    else:
+        bgm_label = Path(bgm).name
+
+    # ── 节奏 / 转场 ───────────────────────────────────────────────────────
+    pace_label  = _PACE_LABELS.get(draft.get('pace', 'medium'), '中等')
+    trans_label = _TRANS_LABELS.get(draft.get('transition_style', 'simple'), '简单')
+    duration    = draft.get('duration_target', 30)
+    reuse       = '允许' if draft.get('allow_asset_reuse', True) else '不允许'
+
+    lines = [
+        '📋 *默认配置清单*（如需调整，直接在对话中说明即可）：',
+        f'├ 🖼  画幅：{frame_label}',
+        f'├ 🔊  音色：{voice_label}',
+        f'├ 🏃  语速：{speed_label}',
+        f'├ 📝  字幕：{subtitle_label}',
+        f'├ 🎵  背景音乐：{bgm_label}',
+        f'├ ✂️  节奏：{pace_label}',
+        f'├ 🎞  转场：{trans_label}',
+        f'├ ⏱  目标时长：{duration} 秒',
+        f'└ 🔁  素材不够时：{reuse}循环',
+        '',
+        '调整示例："换成女声"、"加默认BGM"、"横屏"、"关字幕"、"快节奏"',
+    ]
+    return '\n'.join(lines)
+
+
 def handle_video_edit_message(
     *,
     user_key: str,
@@ -568,6 +645,16 @@ def handle_video_edit_message(
             ]
         if notice:
             lines.insert(1, f'⚠️ {notice}')
+
+        # When user just selected custom_assets mode, prepend the config checklist
+        just_entered_custom = (
+            patch.get('mode') == MODE_CUSTOM_ASSETS
+            and not (current_draft or {}).get('mode')
+        )
+        if just_entered_custom and result.draft:
+            config_block = _format_config_summary(result.draft)
+            lines = [config_block, ''] + lines
+
         reply_text = '\n'.join(filter(None, lines))
     else:
         ex = result.execution or {}
