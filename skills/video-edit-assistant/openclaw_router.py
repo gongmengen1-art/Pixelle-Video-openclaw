@@ -40,6 +40,7 @@ if str(_skill_dir) not in sys.path:
     sys.path.insert(0, str(_skill_dir))
 
 from workspace_cleaner import cleanup_temp_media
+from session_bridge import has_active_session
 
 TRIGGER_PREFIXES = ('/video-edit', 'video-edit:', '视频剪辑：')
 _TG_API = 'https://api.telegram.org'
@@ -125,9 +126,20 @@ def extract_file_ids(message: dict) -> list[str]:
 # 触发判断
 # ---------------------------------------------------------------------------
 
-def is_video_edit_message(text: str) -> bool:
+def is_video_edit_message(text: str, user_key: str | None = None) -> bool:
+    """
+    Return True when this message should be handled by the video-edit skill.
+
+    Two cases:
+    1. Message starts with a trigger prefix (/video-edit, video-edit:, 视频剪辑：)
+    2. The user already has an active session — all replies should continue that flow
+    """
     t = (text or '').strip()
-    return any(t.startswith(p) for p in TRIGGER_PREFIXES)
+    if any(t.startswith(p) for p in TRIGGER_PREFIXES):
+        return True
+    if user_key and has_active_session(user_key):
+        return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -167,10 +179,11 @@ def handle_telegram_update(
         return None
 
     text = message.get('text') or message.get('caption') or ''
-    if not is_video_edit_message(text):
-        return None
-
     user_id = str(message.get('from', {}).get('id', 'unknown'))
+    user_key = f'tg:{user_id}'
+
+    if not is_video_edit_message(text, user_key=user_key):
+        return None
 
     # 下载附件
     file_ids = extract_file_ids(message)
@@ -216,10 +229,11 @@ async def handle_telegram_update_async(
         return None
 
     text = message.get('text') or message.get('caption') or ''
-    if not is_video_edit_message(text):
-        return None
-
     user_id = str(message.get('from', {}).get('id', 'unknown'))
+    user_key = f'tg:{user_id}'
+
+    if not is_video_edit_message(text, user_key=user_key):
+        return None
 
     file_ids = extract_file_ids(message)
     temp_dir = Path(tempfile.mkdtemp(prefix='tg_media_'))
@@ -286,7 +300,7 @@ def route_message(
     不做附件下载，也不清理传入的文件（由调用方负责）。
     返回 None 表示消息不匹配触发前缀。
     """
-    if not is_video_edit_message(text):
+    if not is_video_edit_message(text, user_key=f'tg:{user_id}'):
         return None
     return _invoke_skill(
         user_id=user_id,

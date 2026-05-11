@@ -14,6 +14,14 @@ def _default_session_dir() -> Path:
         return Path.home() / '.openclaw/workspace/memory/video-edit-sessions'
 
 
+def has_active_session(user_key: str) -> bool:
+    """Return True if a non-empty session draft exists for this user."""
+    session_dir = _default_session_dir()
+    safe = ''.join(ch if ch.isalnum() or ch in '-_.' else '_' for ch in user_key)
+    path = session_dir / f'{safe}.json'
+    return path.exists() and path.stat().st_size > 2
+
+
 @dataclass
 class SessionResult:
     state: str  # collecting | executed
