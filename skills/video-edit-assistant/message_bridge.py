@@ -23,6 +23,35 @@ _API_ROUTES = {
     MODE_CUSTOM_ASSETS: '/api/video/scripted-asset-edit/sync',
 }
 
+# Keywords that trigger a full session reset
+_RESET_KEYWORDS = ('重新开始', '重置', '清空', '重来', '取消', '/reset', 'restart', 'reset')
+
+# What each non-API mode will need (shown in coming-soon guidance)
+_COMINGSOON_HINTS: dict[str, str] = {
+    MODE_DIGITAL_HUMAN: (
+        '🤖 *数字人口播*\n'
+        '此模式正在接入，即将上线。届时你需要准备：\n'
+        '• 一张数字人形象图（正面、清晰）\n'
+        '• 口播文案（AI 自动合成语音）\n'
+        '• 可选：自己的录音文件（声音克隆）\n\n'
+        '如需现在使用，请切换到「自定义素材」模式（回复 2）。'
+    ),
+    MODE_IMAGE_TO_VIDEO: (
+        '🎥 *图生视频*\n'
+        '此模式正在接入，即将上线。届时你需要准备：\n'
+        '• 一张或多张图片\n'
+        '• 描述图片如何动起来的文字提示词\n\n'
+        '如需现在使用，请切换到「自定义素材」模式（回复 2）。'
+    ),
+    MODE_ACTION_TRANSFER: (
+        '💃 *动作迁移*\n'
+        '此模式正在接入，即将上线。届时你需要准备：\n'
+        '• 一段包含参考动作的视频（最长 30 秒）\n'
+        '• 一张目标角色的图片\n\n'
+        '如需现在使用，请切换到「自定义素材」模式（回复 2）。'
+    ),
+}
+
 # ── Mode detection ──────────────────────────────────────────────────────────
 
 # Keywords that signal a specific mode (checked in priority order)
@@ -547,6 +576,44 @@ _PACE_LABELS   = {'fast': '快节奏', 'medium': '中等', 'slow': '舒缓'}
 _TRANS_LABELS  = {'simple': '简单', 'fade': '淡入淡出', 'slide': '滑动', 'cut': '硬切'}
 
 
+def _format_quick_create_config_summary(draft: dict) -> str:
+    """Sent once when the user first enters quick_create mode."""
+    tmpl = draft.get('frame_template', '1080x1920/static_default.html')
+    frame_label = '竖屏 9:16（1080×1920）'
+    for prefix, label in _TEMPLATE_LABELS.items():
+        if prefix in tmpl:
+            frame_label = label
+            break
+
+    voice      = draft.get('voice_id', 'zh-CN-YunjianNeural')
+    voice_label = _VOICE_LABELS.get(voice, voice)
+    speed      = draft.get('tts_speed', 1.0)
+    speed_label = f'{speed}x（{"标准" if speed == 1.0 else "较快" if speed > 1.0 else "较慢"}）'
+    subtitle_label = '开启' if draft.get('subtitle_enabled', True) else '关闭'
+    bgm        = draft.get('bgm_path')
+    bgm_label  = '无' if not bgm else ('默认 BGM' if 'default' in str(bgm).lower() else Path(bgm).name)
+    n_scenes   = draft.get('n_scenes', 5)
+    duration   = draft.get('duration_target', 30)
+    pace_label = _PACE_LABELS.get(draft.get('pace', 'medium'), '中等')
+
+    lines = [
+        '📋 *默认配置清单*（如需调整，直接在对话中说明即可）：',
+        f'├ 🖼  画幅：{frame_label}',
+        f'├ 🔊  音色：{voice_label}',
+        f'├ 🏃  语速：{speed_label}',
+        f'├ 📝  字幕：{subtitle_label}',
+        f'├ 🎵  背景音乐：{bgm_label}',
+        f'├ 🎬  场景数：{n_scenes} 个',
+        f'├ ⏱  目标时长：{duration} 秒',
+        f'└ 🥁  节奏：{pace_label}',
+        '',
+        '💡 注：AI 配图功能暂未开放，视频将使用纯文字排版样式。',
+        '',
+        '调整示例："换成女声"、"加默认BGM"、"横屏"、"关字幕"、"8个场景"',
+    ]
+    return '\n'.join(lines)
+
+
 def _format_config_summary(draft: dict) -> str:
     """
     Format the current custom_assets draft as a human-readable config checklist.
@@ -618,9 +685,47 @@ def handle_video_edit_message(
     bridge = VideoEditSessionBridge()
     current_draft = bridge.load_draft(user_key)
 
+    # ── Session reset ─────────────────────────────────────────────────────────
+    content_for_reset = _strip_trigger((text or '').strip())
+    if any(k in content_for_reset for k in _RESET_KEYWORDS):
+        bridge.clear_draft(user_key)
+        mode_menu = (
+            '已重置会话。\n\n'
+            '请重新选择创作模式（回复序号或模式名）：\n'
+            '  1. ⚡ 快速制作（给主题，AI 生成文案 + TTS 配音）\n'
+            '  2. 🎨 自定义素材（你提供文案和图片/视频素材）\n'
+            '  3. 🤖 数字人口播（即将上线）\n'
+            '  4. 🎥 图生视频（即将上线）\n'
+            '  5. 💃 动作迁移（即将上线）'
+        )
+        return {
+            'state':        'reset',
+            'patch':        {},
+            'aspect_ratio': None,
+            'reply_text':   mode_menu,
+            'session_path': str(bridge._session_path(user_key)),
+            'draft':        None,
+            'execution':    None,
+        }
+
     patch = build_patch_from_message(text, media_paths=media_paths, current_draft=current_draft)
     aspect_ratio = patch.pop('_aspect_ratio', None) or _extract_aspect_ratio(text)
     notice = patch.pop('_notice', None)
+
+    # ── Coming-soon guidance for non-API modes ────────────────────────────────
+    selected_mode = patch.get('mode') or (current_draft or {}).get('mode')
+    if selected_mode in _COMINGSOON_HINTS and selected_mode not in _API_ROUTES:
+        # Don't persist these modes — clear any draft so user can switch back cleanly
+        bridge.clear_draft(user_key)
+        return {
+            'state':        'collecting',
+            'patch':        patch,
+            'aspect_ratio': aspect_ratio,
+            'reply_text':   _COMINGSOON_HINTS[selected_mode],
+            'session_path': str(bridge._session_path(user_key)),
+            'draft':        None,
+            'execution':    None,
+        }
 
     def execute_func(payload: dict) -> dict:
         return _execute_api(payload, resolved_api_base, cfg, upload_oss)
@@ -646,13 +751,22 @@ def handle_video_edit_message(
         if notice:
             lines.insert(1, f'⚠️ {notice}')
 
+        prev_mode = (current_draft or {}).get('mode')
+
         # When user just selected custom_assets mode, prepend the config checklist
         just_entered_custom = (
-            patch.get('mode') == MODE_CUSTOM_ASSETS
-            and not (current_draft or {}).get('mode')
+            patch.get('mode') == MODE_CUSTOM_ASSETS and not prev_mode
         )
         if just_entered_custom and result.draft:
             config_block = _format_config_summary(result.draft)
+            lines = [config_block, ''] + lines
+
+        # When user just selected quick_create mode, prepend the config checklist
+        just_entered_quick = (
+            patch.get('mode') == MODE_QUICK_CREATE and not prev_mode
+        )
+        if just_entered_quick and result.draft:
+            config_block = _format_quick_create_config_summary(result.draft)
             lines = [config_block, ''] + lines
 
         reply_text = '\n'.join(filter(None, lines))
