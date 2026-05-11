@@ -375,6 +375,300 @@ PYEOF
 
 ok "接入示例已写入：${ROUTE_SNIPPET_FILE}"
 
+# ── 8.1 OpenClaw 原生 Telegram Router Extension ─────────────────────────────
+# 将 /video-edit 消息在进入 LLM 前拦截，直接调用本 skill 的 CLI。
+# 这一步是 OpenClaw 环境里的真正自动路由接入；上面的 Python 示例用于外部 Bot 手动集成。
+OPENCLAW_WORKSPACE="${HOME}/.openclaw/workspace"
+EXT_DIR="${OPENCLAW_WORKSPACE}/.openclaw/extensions/video-edit-router"
+SKILL_LINK_DIR="${HOME}/.agents/skills"
+SKILL_LINK="${SKILL_LINK_DIR}/video-edit-assistant"
+PYTHON_BIN="${SCRIPT_DIR}/.venv/bin/python"
+ROUTE_SCRIPT="${SCRIPT_DIR}/skills/video-edit-assistant/route_video_edit_message.py"
+SESSION_DIR="${OPENCLAW_WORKSPACE}/memory/video-edit-sessions"
+
+mkdir -p "${EXT_DIR}" "${SKILL_LINK_DIR}" "${SESSION_DIR}"
+ln -sfn "${SCRIPT_DIR}/skills/video-edit-assistant" "${SKILL_LINK}"
+
+cat > "${EXT_DIR}/package.json" <<'EOF'
+{
+  "name": "video-edit-router",
+  "version": "0.2.0",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}
+EOF
+
+cat > "${EXT_DIR}/openclaw.plugin.json" <<EOF
+{
+  "id": "video-edit-router",
+  "name": "Video Edit Telegram Router",
+  "version": "0.2.0",
+  "description": "Claims Telegram /video-edit conversations and routes them to the Pixelle-Video bridge.",
+  "entry": "./index.js",
+  "enabled": true,
+  "config": {
+    "python": "${PYTHON_BIN}",
+    "script": "${ROUTE_SCRIPT}",
+    "cwd": "${SCRIPT_DIR}",
+    "apiBase": "http://127.0.0.1:${API_PORT}",
+    "uploadOss": true,
+    "sessionDir": "${SESSION_DIR}"
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "python": { "type": "string" },
+      "script": { "type": "string" },
+      "cwd": { "type": "string" },
+      "apiBase": { "type": "string" },
+      "uploadOss": { "type": "boolean" },
+      "sessionDir": { "type": "string" }
+    }
+  }
+}
+EOF
+
+cat > "${EXT_DIR}/index.js" <<EOF
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { existsSync } from "node:fs";
+import { readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
+const DEFAULT_PYTHON = ${PYTHON_BIN@Q};
+const DEFAULT_SCRIPT = ${ROUTE_SCRIPT@Q};
+const DEFAULT_CWD = ${SCRIPT_DIR@Q};
+const DEFAULT_API_BASE = "http://127.0.0.1:${API_PORT}";
+const DEFAULT_SESSION_DIR = ${SESSION_DIR@Q};
+const TRIGGERS = ["/video-edit", "/video_edit", "video-edit:", "视频剪辑："];
+const COMMAND_ALIASES = ["video_edit", "video_edit_assistant"];
+const MEDIA_EXT = /\\.(mp4|mov|m4v|webm|avi|mkv|jpg|jpeg|png|webp|gif|wav|mp3|m4a)$/i;
+const LOCAL_MEDIA_RE = /(?:file:\\/\\/)?(\\/[\\S'"<>]+\\.(?:mp4|mov|m4v|webm|avi|mkv|jpg|jpeg|png|webp|gif|wav|mp3|m4a))/gi;
+
+function textOf(event) {
+  return String(event.bodyForAgent || event.body || event.transcript || event.content || "").trim();
+}
+
+function normalizeSender(senderId) {
+  const raw = String(senderId || "current");
+  return raw.replace(/^telegram:/, "").replace(/^tg:/, "");
+}
+
+function userKey(event, ctx) {
+  return "tg:" + normalizeSender(event.senderId || ctx.senderId || ctx.from);
+}
+
+function hasTrigger(text) {
+  const s = String(text || "").trim();
+  return TRIGGERS.some((prefix) => s.startsWith(prefix));
+}
+
+function collectStrings(value, out = []) {
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const item of value) collectStrings(item, out);
+  else if (value && typeof value === "object") for (const item of Object.values(value)) collectStrings(item, out);
+  return out;
+}
+
+function collectMediaPaths(event) {
+  const seen = new Set();
+  const candidates = [];
+  for (const s of collectStrings(event)) {
+    if (MEDIA_EXT.test(s) && existsSync(s.replace(/^file:\\/\\//, ""))) candidates.push(s.replace(/^file:\\/\\//, ""));
+    for (const match of s.matchAll(LOCAL_MEDIA_RE)) candidates.push(match[1]);
+  }
+  return candidates.filter((p) => {
+    if (seen.has(p) || !existsSync(p)) return false;
+    seen.add(p);
+    return true;
+  });
+}
+
+async function hasDraft(sessionDir, key) {
+  const bareKey = String(key).replace(/^tg:/, "telegram-").replace(/^telegram:/, "telegram-");
+  const safeKey = String(key).replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const names = [key + ".json", safeKey + ".json", bareKey + ".json"];
+  try {
+    const entries = await readdir(sessionDir);
+    return names.some((name) => entries.includes(name));
+  } catch {
+    return false;
+  }
+}
+
+function pluginConfigFromCommand(ctx) {
+  return ctx?.config?.plugins?.entries?.["video-edit-router"]?.config || {};
+}
+
+function resolvedConfig(raw = {}) {
+  return {
+    python: String(raw.python || DEFAULT_PYTHON),
+    script: String(raw.script || DEFAULT_SCRIPT),
+    cwd: String(raw.cwd || DEFAULT_CWD),
+    apiBase: String(raw.apiBase || DEFAULT_API_BASE),
+    uploadOss: raw.uploadOss !== false,
+    sessionDir: String(raw.sessionDir || DEFAULT_SESSION_DIR),
+  };
+}
+
+async function runBridge({ python, script, cwd, apiBase, uploadOss, sessionDir, key, text, media }) {
+  const args = [script, "--user-key", key, "--text", text, "--api-base", apiBase, "--pretty"];
+  if (uploadOss) args.push("--upload-oss");
+  for (const path of media) args.push("--media", path);
+
+  const { stdout } = await execFileAsync(python, args, {
+    cwd,
+    env: { ...process.env, VIDEO_EDIT_SESSION_DIR: sessionDir },
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: 20 * 60 * 1000,
+  });
+  return JSON.parse(stdout);
+}
+
+async function runCommandBridge(ctx, commandText) {
+  const cfg = resolvedConfig(pluginConfigFromCommand(ctx));
+  const key = "tg:" + normalizeSender(ctx.senderId || ctx.from);
+  const result = await runBridge({ ...cfg, key, text: commandText, media: [] });
+  return { text: result.reply_text || JSON.stringify(result) };
+}
+
+function commandDef(name, nativeName = name.replaceAll("-", "_")) {
+  return {
+    name,
+    nativeNames: { default: nativeName },
+    nativeProgressMessages: { default: "处理中..." },
+    description: "进入 Pixelle-Video 多轮自动剪辑流程",
+    channels: ["telegram"],
+    acceptsArgs: true,
+    requireAuth: true,
+    async handler(ctx) {
+      try {
+        const commandText = "/video-edit" + (ctx.args ? " " + ctx.args : "");
+        return await runCommandBridge(ctx, commandText);
+      } catch (error) {
+        return { text: "视频剪辑桥接执行失败：" + (error?.message || String(error)), isError: true };
+      }
+    },
+  };
+}
+
+export default definePluginEntry({
+  id: "video-edit-router",
+  name: "Video Edit Telegram Router",
+  description: "Routes Telegram /video-edit turns into Pixelle-Video without invoking the LLM.",
+  register(api) {
+    for (const alias of COMMAND_ALIASES) api.registerCommand(commandDef(alias, alias));
+
+    api.on("inbound_claim", async (event, ctx) => {
+      const rawCfg = event.context?.pluginConfig || ctx.pluginConfig || {};
+      if (rawCfg.enabled === false) return;
+      if (event.channel !== "telegram") return;
+
+      const text = textOf(event);
+      const cfg = resolvedConfig(rawCfg);
+      const key = userKey(event, ctx);
+      const shouldHandle = hasTrigger(text) || await hasDraft(cfg.sessionDir, key);
+      if (!shouldHandle) return;
+
+      try {
+        const result = await runBridge({ ...cfg, key, text, media: collectMediaPaths(event) });
+        return {
+          handled: true,
+          reply: {
+            text: result.reply_text || JSON.stringify(result),
+            replyToId: event.messageId ? String(event.messageId) : undefined,
+          },
+        };
+      } catch (error) {
+        return {
+          handled: true,
+          reply: {
+            text: "视频剪辑桥接执行失败：" + (error?.message || String(error)),
+            replyToId: event.messageId ? String(event.messageId) : undefined,
+            isError: true,
+          },
+        };
+      }
+    }, { priority: 100, timeoutMs: 600000 });
+  },
+});
+EOF
+
+node --check "${EXT_DIR}/index.js"
+ok "OpenClaw Telegram router extension 已安装：${EXT_DIR}"
+ok "Skill symlink 已安装：${SKILL_LINK}"
+
+# 将 workspace extension 安装/刷新到 OpenClaw 全局插件目录，确保 gateway 能发现并加载。
+if command -v openclaw >/dev/null 2>&1; then
+  info "正在安装/刷新 OpenClaw video-edit-router 插件…"
+  if openclaw plugins install --force "${EXT_DIR}" >/tmp/video-edit-router-plugin-install.log 2>&1; then
+    ok "OpenClaw 插件已安装/刷新：video-edit-router"
+  else
+    warn "OpenClaw 插件安装命令失败，请检查 /tmp/video-edit-router-plugin-install.log"
+  fi
+else
+  warn "未找到 openclaw CLI，跳过插件全局安装"
+fi
+
+# Telegram Bot 菜单命令注册。
+# 注意：Telegram Bot API 不允许命令名包含连字符，所以 /video-edit 不能出现在菜单中；
+# 这里注册合法的 /video_edit，并且 router 同时兼容用户手动输入 /video-edit。
+section "注册 Telegram Bot 指令菜单"
+python3 - <<'PYEOF'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+config_path = Path.home() / ".openclaw" / "openclaw.json"
+token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+if not token and config_path.exists():
+    try:
+        cfg = json.loads(config_path.read_text())
+        token = str(((cfg.get("channels") or {}).get("telegram") or {}).get("botToken") or "").strip()
+    except Exception as exc:
+        print(f"WARN: 读取 OpenClaw Telegram 配置失败：{exc}", file=sys.stderr)
+
+if not token:
+    print("WARN: 未找到 Telegram bot token，跳过 setMyCommands", file=sys.stderr)
+    sys.exit(0)
+
+commands = [
+    {
+        "command": "video_edit",
+        "description": "进入 Pixelle-Video 自动剪辑流程",
+    }
+]
+payload = json.dumps({"commands": commands, "scope": {"type": "default"}}, ensure_ascii=False).encode("utf-8")
+req = urllib.request.Request(
+    f"https://api.telegram.org/bot{token}/setMyCommands",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    if body.get("ok"):
+        print("OK: Telegram Bot 菜单命令已注册：/video_edit")
+    else:
+        print("WARN: Telegram setMyCommands 返回失败：" + json.dumps(body, ensure_ascii=False), file=sys.stderr)
+except urllib.error.HTTPError as exc:
+    detail = exc.read().decode("utf-8", "replace")
+    print(f"WARN: Telegram setMyCommands HTTP {exc.code}: {detail}", file=sys.stderr)
+except Exception as exc:
+    print(f"WARN: Telegram setMyCommands 失败：{exc}", file=sys.stderr)
+PYEOF
+
+
 # ── 9. 端到端冒烟测试 ────────────────────────────────────────────────────────
 section "端到端冒烟测试"
 
@@ -386,7 +680,7 @@ else
   if uv run python3 skills/video-edit-assistant/e2e_test.py \
        --asset "$DEMO_ASSET" \
        --text "安装验证视频，请忽略。" \
-       --mode single 2>&1 | grep -E "PASS|FAIL|OSS|error"; then
+       --skill-mode quick_create 2>&1 | grep -E "PASS|FAIL|OSS|error"; then
     ok "冒烟测试完成"
   else
     warn "冒烟测试输出异常，请手动检查"
@@ -405,10 +699,9 @@ echo -e "  配置文件   : ${CYN}${SCRIPT_DIR}/config.yaml${RST}"
 echo -e "  清理日志   : ${CYN}/tmp/pixelle-cleanup.log${RST}"
 echo ""
 echo -e "${BLD}openclaw 路由接入：${RST}"
-echo -e "  将 ${CYN}skills/video-edit-assistant/openclaw_router.py${RST} 中的"
-echo -e "  ${CYN}handle_telegram_update()${RST} 或 ${CYN}handle_telegram_update_async()${RST}"
-echo -e "  添加到 openclaw 的 Telegram Bot 消息处理器"
-echo -e "  详见：${CYN}${ROUTE_SNIPPET_FILE}${RST}"
+echo -e "  原生 Telegram router extension 已自动安装：${CYN}${EXT_DIR}${RST}"
+echo -e "  Skill symlink：${CYN}${SKILL_LINK}${RST}"
+echo -e "  外部 Bot 手动接入示例：${CYN}${ROUTE_SNIPPET_FILE}${RST}"
 echo ""
 echo -e "${BLD}Telegram 验证方式：${RST}"
 echo -e "  在 Telegram 向 Bot 发送："
