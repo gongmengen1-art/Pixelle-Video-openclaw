@@ -15,7 +15,7 @@ from skills.video_edit_intake import (
     MODE_LABELS,
 )
 
-TRIGGER_PREFIXES = ('/video-edit', 'video-edit:', '视频剪辑：')
+TRIGGER_PREFIXES = ('/video-edit', '/video_edit', 'video-edit:', '视频剪辑：')
 
 # API endpoints per mode
 _API_ROUTES = {
