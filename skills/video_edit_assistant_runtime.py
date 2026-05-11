@@ -75,6 +75,16 @@ class VideoEditAssistantRuntime:
         if ready:
             return f'✅ {mode_label} — 信息已齐，开始生成视频…'
 
+        # Custom assets: waiting for user confirmation after assets received
+        if missing_required == ['_confirmed']:
+            n = len(self.state.data.get('asset_paths') or [])
+            asset_word = '个素材' if n > 0 else '个素材'
+            return (
+                f'📋 {mode_label}\n'
+                f'已收到 {n} {asset_word}。\n'
+                f'如还有素材要补充，继续发送即可；全部准备好后发送「开始」来生成视频。'
+            )
+
         if missing_required:
             joined = '、'.join(missing_required)
             return f'📋 {mode_label}\n还缺这些关键项：{joined}。'
