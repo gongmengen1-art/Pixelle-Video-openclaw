@@ -320,9 +320,13 @@ def _patch_custom_assets(content: str, sections: dict, media_paths: list[str] | 
         patch['subtitle_enabled'] = subtitle
 
     if media_paths:
+        # Pass new assets; IntakeState.merge() will accumulate them and reset _confirmed
         patch['asset_paths'] = media_paths
-        if len(media_paths) > 1:
-            patch['split_mode'] = 'sentence'
+
+    # Confirmation detection — triggers video generation
+    _CONFIRM_KEYWORDS = ('开始', '确认', '可以了', '好了', '没了', '就这些', '开始生成', '帮我生成', 'start', 'go')
+    if any(k in content for k in _CONFIRM_KEYWORDS):
+        patch['_confirmed'] = True
 
     return patch
 

@@ -53,6 +53,7 @@ MODE_DEFAULTS: dict[str | None, dict[str, Any]] = {
         'mode':                 MODE_CUSTOM_ASSETS,
         'script_text':          '',
         'asset_paths':          [],
+        '_confirmed':           False,   # user must send "开始" after uploading all assets
         'split_mode':           'paragraph',
         'duration_target':      30,
         'skip_asset_analysis':  True,
@@ -91,7 +92,7 @@ MODE_DEFAULTS: dict[str | None, dict[str, Any]] = {
 MODE_REQUIRED_FIELDS: dict[str | None, list[str]] = {
     None:                [],   # mode unknown — prompt for mode first
     MODE_QUICK_CREATE:   ['text', 'frame_template'],
-    MODE_CUSTOM_ASSETS:  ['script_text', 'asset_paths', 'frame_template'],
+    MODE_CUSTOM_ASSETS:  ['script_text', 'asset_paths', 'frame_template', '_confirmed'],
     MODE_DIGITAL_HUMAN:  ['asset_paths', 'audio_source'],
     MODE_IMAGE_TO_VIDEO: ['asset_paths', 'prompt'],
     MODE_ACTION_TRANSFER: ['reference_video', 'target_image', 'prompt'],
@@ -130,8 +131,9 @@ MODE_FIELD_PROMPTS: dict[str, dict[str, str]] = {
     },
     MODE_CUSTOM_ASSETS: {
         'script_text':          '请把完整文案发给我，我会按段落或句子拆成视频场景。',
-        'asset_paths':          '请把图片或视频素材发给我；多个文件会按顺序匹配文案场景。',
+        'asset_paths':          '请把图片或视频素材发给我；多个文件一条条发即可，我会全部收集。',
         'frame_template':       '你要竖屏（9:16）、横屏（16:9）还是方形（1:1）？',
+        '_confirmed':           '素材已全部收到吗？发送「开始」来生成视频（如还有素材，直接继续发送即可）。',
         'tts_workflow':         '你要用默认音色，还是指定一个 TTS 工作流？',
         'ref_audio':            '如果你想声音克隆，请发一段 mp3/wav 参考音频；不需要就跳过。',
         'bgm_path':             '要加背景音乐吗？说"默认 BGM"或发一个音频文件，不要就跳过。',
@@ -226,10 +228,19 @@ class IntakeState:
             if key == 'asset_paths':
                 if isinstance(value, list):
                     cleaned = [str(v).strip() for v in value if str(v).strip()]
-                    if cleaned:
-                        self.data[key] = cleaned
                 elif isinstance(value, str) and value.strip():
-                    self.data[key] = [value.strip()]
+                    cleaned = [value.strip()]
+                else:
+                    cleaned = []
+                if cleaned:
+                    if self.data.get('mode') == MODE_CUSTOM_ASSETS:
+                        # Accumulate across turns; reset confirmation so user must re-confirm
+                        existing = self.data.get('asset_paths') or []
+                        merged = existing + [p for p in cleaned if p not in existing]
+                        self.data['asset_paths'] = merged
+                        self.data['_confirmed'] = False
+                    else:
+                        self.data['asset_paths'] = cleaned
                 continue
             if isinstance(value, str):
                 value = value.strip()
@@ -255,14 +266,29 @@ class IntakeState:
         mode = self.data.get('mode')
         missing = []
         for field in MODE_REQUIRED_FIELDS.get(mode, []):
-            value = self.data.get(field)
-            if value is None:
-                missing.append(field)
-            elif isinstance(value, str) and not value.strip():
-                missing.append(field)
-            elif isinstance(value, list) and len(value) == 0:
+            # _confirmed: only require it when all OTHER required fields are satisfied
+            if field == '_confirmed':
+                other = [f for f in MODE_REQUIRED_FIELDS.get(mode, []) if f != '_confirmed']
+                if any(self._is_field_missing(f) for f in other):
+                    continue   # don't ask for confirmation yet
+                if not self.data.get('_confirmed'):
+                    missing.append('_confirmed')
+                continue
+            if self._is_field_missing(field):
                 missing.append(field)
         return missing
+
+    def _is_field_missing(self, field: str) -> bool:
+        value = self.data.get(field)
+        if value is None:
+            return True
+        if isinstance(value, str) and not value.strip():
+            return True
+        if isinstance(value, list) and len(value) == 0:
+            return True
+        if value is False:
+            return True
+        return False
 
     def missing_recommended_fields(self) -> list[str]:
         mode = self.data.get('mode')
