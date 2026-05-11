@@ -15,7 +15,7 @@ from skills.video_edit_intake import (
     MODE_LABELS,
 )
 
-TRIGGER_PREFIXES = ('/video-edit', 'video-edit:', '视频剪辑：')
+TRIGGER_PREFIXES = ('/video-edit', '/video_edit', 'video-edit:', '视频剪辑：')
 
 # API endpoints per mode
 _API_ROUTES = {
@@ -688,9 +688,10 @@ def handle_video_edit_message(
     # ── Session reset ─────────────────────────────────────────────────────────
     content_for_reset = _strip_trigger((text or '').strip())
     if any(k in content_for_reset for k in _RESET_KEYWORDS):
-        bridge.clear_draft(user_key)
+        # Keep a blank session so the user stays inside the skill after reset
+        bridge.save_draft(user_key, {'mode': None})
         mode_menu = (
-            '已重置会话。\n\n'
+            '已重置，当前仍在视频剪辑助手中。\n\n'
             '请重新选择创作模式（回复序号或模式名）：\n'
             '  1. ⚡ 快速制作（给主题，AI 生成文案 + TTS 配音）\n'
             '  2. 🎨 自定义素材（你提供文案和图片/视频素材）\n'
@@ -779,11 +780,17 @@ def handle_video_edit_message(
         else:
             oss_url = (ex.get('oss') or {}).get('url')
             local_url = (ex.get('response') or {}).get('video_url')
-            reply_text = '视频已生成。'
+            lines = ['🎉 视频生成完成！']
             if oss_url:
-                reply_text += f'\nOSS 链接：{oss_url}'
+                lines.append(f'📎 {oss_url}')
             elif local_url:
-                reply_text += f'\n本地链接：{local_url}'
+                lines.append(f'📎 {local_url}')
+            lines += [
+                '',
+                '✅ 已退出生成模式，后续消息将由助手正常处理。',
+                '如需再次生成视频，发送 /video-edit 重新开始。',
+            ]
+            reply_text = '\n'.join(lines)
 
     return {
         'state':        result.state,

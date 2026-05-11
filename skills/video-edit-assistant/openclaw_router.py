@@ -42,7 +42,7 @@ if str(_skill_dir) not in sys.path:
 from workspace_cleaner import cleanup_temp_media
 from session_bridge import has_active_session
 
-TRIGGER_PREFIXES = ('/video-edit', 'video-edit:', '视频剪辑：')
+TRIGGER_PREFIXES = ('/video-edit', '/video_edit', 'video-edit:', '视频剪辑：')
 _TG_API = 'https://api.telegram.org'
 
 
