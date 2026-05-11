@@ -331,6 +331,7 @@ class IntakeState:
 
         elif mode == MODE_CUSTOM_ASSETS:
             payload = {
+                '_skill_mode':         MODE_CUSTOM_ASSETS,   # routing hint, stripped before POST
                 'script_text':         d.get('script_text', ''),
                 'asset_paths':         d.get('asset_paths', []),
                 'project_name':        d.get('project_name') or None,
