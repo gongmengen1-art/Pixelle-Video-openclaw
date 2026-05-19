@@ -119,17 +119,101 @@ ok "Python 依赖安装完成"
 # ── 4. Playwright Chromium ───────────────────────────────────────────────────
 section "安装 Playwright Chromium（HTML 渲染）"
 
-if uv run python3 -c "
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    b = p.chromium.launch(headless=True)
-    b.close()
-" 2>/dev/null; then
+# 查找系统中已安装的 Chrome/Chromium 可执行文件
+_find_system_chromium() {
+  for bin in google-chrome-stable google-chrome chromium chromium-browser; do
+    if command -v "$bin" &>/dev/null; then command -v "$bin"; return 0; fi
+  done
+  [[ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]] \
+    && echo "/Applications/Chromium.app/Contents/MacOS/Chromium" && return 0
+  [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]] \
+    && echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" && return 0
+  return 1
+}
+
+# 测试 Playwright Chromium 是否可正常启动（支持自定义可执行文件路径）
+_pw_chromium_ok() {
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}" \
+  uv run python3 - <<'PYEOF' 2>/dev/null
+import os, sys
+ep = os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH', '')
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        kw = {'executable_path': ep} if ep else {}
+        b = p.chromium.launch(headless=True, **kw)
+        b.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
+# 将 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH 写入项目 .env（幂等）
+_write_chromium_env() {
+  local path="$1" env_file="${SCRIPT_DIR}/.env"
+  if [[ -f "$env_file" ]] && grep -q "^PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=" "$env_file"; then
+    python3 -c "
+import re, sys
+path = sys.argv[1]; f = '${env_file}'
+content = open(f).read()
+content = re.sub(r'^PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=.*$',
+                 'PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=' + path,
+                 content, flags=re.MULTILINE)
+open(f, 'w').write(content)
+" "$path"
+  else
+    echo "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=${path}" >> "$env_file"
+  fi
+}
+
+if _pw_chromium_ok; then
   ok "Playwright Chromium 已就绪"
 else
-  info "正在安装 Chromium …"
-  uv run playwright install chromium
-  ok "Playwright Chromium 安装完成"
+  info "正在安装 Playwright Chromium …"
+  PW_INSTALL_LOG="$(uv run playwright install chromium 2>&1)" && PW_OK=true || PW_OK=false
+
+  if [[ "$PW_OK" == "true" ]]; then
+    ok "Playwright Chromium 安装完成"
+  else
+    if echo "$PW_INSTALL_LOG" | grep -qi "does not support\|not supported"; then
+      warn "当前 OS 版本不在 Playwright 官方支持列表，尝试 --with-deps 方案 …"
+      uv run playwright install --with-deps chromium 2>/dev/null && PW_OK=true || true
+    fi
+
+    if [[ "$PW_OK" != "true" ]]; then
+      warn "Playwright 无法安装 Chromium，改用系统浏览器 …"
+      SYSTEM_CHROMIUM=""
+      if ! SYSTEM_CHROMIUM=$(_find_system_chromium 2>/dev/null); then
+        info "正在安装系统 Chromium …"
+        if [[ "$OS" == "Darwin" ]]; then
+          brew install --cask chromium 2>/dev/null || true
+        elif command -v snap &>/dev/null; then
+          sudo snap install chromium 2>/dev/null || true
+        elif command -v apt-get &>/dev/null; then
+          sudo apt-get install -y chromium-browser 2>/dev/null \
+            || sudo apt-get install -y chromium 2>/dev/null || true
+        elif command -v yum &>/dev/null; then
+          sudo yum install -y chromium 2>/dev/null || true
+        fi
+        SYSTEM_CHROMIUM=$(_find_system_chromium 2>/dev/null || echo "")
+      fi
+
+      if [[ -n "${SYSTEM_CHROMIUM:-}" ]] && [[ -x "$SYSTEM_CHROMIUM" ]]; then
+        export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$SYSTEM_CHROMIUM"
+        _write_chromium_env "$SYSTEM_CHROMIUM"
+        ok "将使用系统 Chromium：${SYSTEM_CHROMIUM}"
+        if _pw_chromium_ok; then
+          ok "Playwright + 系统 Chromium 验证通过"
+        else
+          warn "Playwright 仍无法使用系统 Chromium，视频渲染可能受限"
+        fi
+      else
+        warn "未找到可用的 Chromium，视频渲染功能将不可用"
+        warn "可手动安装：sudo apt-get install -y chromium-browser"
+      fi
+    fi
+  fi
 fi
 
 # ── 5. 配置向导 ──────────────────────────────────────────────────────────────
@@ -258,6 +342,7 @@ ExecStart=${UV_BIN} run python api/app.py --host 127.0.0.1 --port ${API_PORT}
 Restart=always
 RestartSec=5
 Environment=PATH=${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-${SCRIPT_DIR}/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -277,8 +362,12 @@ else
   # macOS / 无 systemd 环境：后台运行
   warn "当前环境无 systemd，以后台进程方式启动 API"
   pkill -f "python api/app.py" 2>/dev/null || true
-  nohup uv run python api/app.py --host 127.0.0.1 --port "$API_PORT" \
-    > /tmp/pixelle-video-api.log 2>&1 &
+  nohup bash -c "
+    set -a
+    [ -f '${SCRIPT_DIR}/.env' ] && . '${SCRIPT_DIR}/.env'
+    set +a
+    exec ${UV_BIN} run python api/app.py --host 127.0.0.1 --port ${API_PORT}
+  " > /tmp/pixelle-video-api.log 2>&1 &
   ok "API 后台进程已启动（日志：/tmp/pixelle-video-api.log）"
   sleep 4
 fi

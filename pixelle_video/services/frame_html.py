@@ -327,7 +327,10 @@ class HTMLFrameGenerator:
             cls._playwright = None
             from playwright.async_api import async_playwright
             cls._playwright = await async_playwright().start()
+            _chromium_exec = os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH') or None
+            _launch_kwargs = {'executable_path': _chromium_exec} if _chromium_exec else {}
             cls._browser = await cls._playwright.chromium.launch(
+                **_launch_kwargs,
                 args=[
                     '--no-sandbox',
                     '--disable-dev-shm-usage',
