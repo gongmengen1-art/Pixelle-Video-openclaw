@@ -18,14 +18,14 @@ https://github.com/user-attachments/assets/a42e7457-fcc8-40da-83fc-784c45a8b95d
 
 ## OpenClaw 二开说明
 
-这是一个基于上游 `AIDC-AI/Pixelle-Video` 的 OpenClaw 二开快照仓库，已在原框架基础上构建了一条完整的 **Telegram 对话式视频自动剪辑链路**：用户在 Telegram 多轮对话中提供文案和素材，系统自动剪辑并将成片上传至阿里云 OSS，最终返回公网可访问的视频链接。
+这是一个基于上游 `AIDC-AI/Pixelle-Video` 的 OpenClaw 二开快照仓库，已在原框架基础上构建了一条完整的 **多 IM 渠道对话式视频自动剪辑链路**：用户在 Telegram、飞书、企业微信等任意 IM 工具中多轮对话提供文案和素材，系统自动剪辑并将成片上传至阿里云 OSS，最终返回公网可访问的视频链接。
 
 ### 整体架构
 
 ```
-Telegram 用户
+IM 用户（Telegram / 飞书 / 企业微信 / Slack 等）
   ↓ 发送 /video-edit 消息 + 图片/视频附件
-openclaw Bot（openclaw_router.py）
+OpenClaw IM Router Extension（inbound_claim，任意渠道）
   ↓ 下载附件 → 调用 skill CLI
 消息解析层（message_bridge.py）
   ↓ 提取 aspect_ratio / duration / script / assets 等字段
@@ -35,7 +35,7 @@ Pixelle-Video API（POST /api/video/scripted-asset-edit/sync）
   ↓ 文案拆分 → 素材映射 → edge-TTS → Playwright 渲染 → ffmpeg 合成
 阿里云 OSS（upload_to_oss.py）
   ↓ 上传 → 返回公网 URL → 本地任务目录立即清理
-Telegram 用户收到视频链接
+IM 用户收到视频链接
 ```
 
 ### 新增文件索引
@@ -57,7 +57,7 @@ Telegram 用户收到视频链接
 | `skills/video_edit_assistant_adapter.py` | 无状态 adapter，供外部 agent/session 调用 |
 | `skills/video_edit_assistant_cli.py` | 最小 CLI 入口 |
 
-#### openclaw Telegram 接入层（`skills/video-edit-assistant/`）
+#### openclaw 多 IM 接入层（`skills/video-edit-assistant/`）
 
 | 文件 | 说明 |
 |------|------|
@@ -87,13 +87,25 @@ bash install.sh
 ```
 
 脚本将交互式引导填写必填项（OSS AK/SK/Bucket），完成后自动：
-- 安装 uv / ffmpeg / Playwright Chromium
+- 安装 uv / ffmpeg / Playwright Chromium（不支持的 OS 自动降级使用系统 Chromium）
+- 将 skill 注册到 `~/.openclaw/workspace/skills/`（任意 IM 渠道可见）
+- 安装 OpenClaw IM Router Extension（支持 Telegram / 飞书 / 企业微信 / Slack 等）
 - 注册 systemd 服务（Linux）并设为开机自启
 - 添加 crontab 每日清理任务
 - 运行 E2E 冒烟测试验证全链路
 
-### openclaw Bot 接入（两行代码）
+### IM 渠道接入说明
 
+| 渠道 | 触发方式 | 菜单注册 |
+|------|----------|----------|
+| Telegram | `/video_edit` 或 `/video-edit` | install.sh 自动注册 |
+| 飞书 / Lark | `/video_edit` | 飞书开放平台 → 机器人 → 菜单，手动添加一次 |
+| 企业微信 | `/video_edit` | 企业微信后台 → 自定义菜单，手动添加一次 |
+| Slack / Discord 等 | 直接发送 `/video_edit` | 无需额外配置 |
+
+触发前缀（任意渠道通用）：`/video-edit`、`/video_edit`、`video-edit:`、`视频剪辑：`
+
+**Telegram 两行代码接入（外部 Bot）：**
 ```python
 from skills.video-edit-assistant.openclaw_router import handle_telegram_update_async
 
@@ -101,8 +113,6 @@ result = await handle_telegram_update_async(bot_token=BOT_TOKEN, update=update)
 if result:
     await message.reply_text(result[“reply_text”])
 ```
-
-触发前缀：`/video-edit`、`video-edit:`、`视频剪辑：`
 
 ### 磁盘管理
 
@@ -152,6 +162,8 @@ uv run python3 skills/video-edit-assistant/e2e_test.py \
 
 ## 📋 最近更新
 
+- ✅ **2026-05-18**: 支持多 IM 渠道路由（飞书、企业微信、Slack 等），skill 自动注册到 OpenClaw workspace/skills/，`inbound_claim` 不再限定 Telegram
+- ✅ **2026-05-18**: 修复 Playwright Chromium 在不支持的 OS（如 Ubuntu 26.04）上的安装失败问题，自动降级使用系统 Chromium 并持久化配置
 - ✅ **2026-01-26**: 新增「动作迁移」模块，上传参考视频和图片进行动作迁移
 - ✅ **2026-01-14**: 新增「数字人口播」和「图生视频」流水线，新增多语言 TTS 音色支持
 - ✅ **2026-01-06**: 新增 RunningHub 48G 显存机器调用支持
