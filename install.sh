@@ -475,7 +475,10 @@ PYTHON_BIN="${SCRIPT_DIR}/.venv/bin/python"
 ROUTE_SCRIPT="${SCRIPT_DIR}/skills/video-edit-assistant/route_video_edit_message.py"
 SESSION_DIR="${OPENCLAW_WORKSPACE}/memory/video-edit-sessions"
 
-mkdir -p "${EXT_DIR}" "${SKILL_LINK_DIR}" "${SESSION_DIR}"
+SKILL_WS_DIR="${OPENCLAW_WORKSPACE}/skills"
+mkdir -p "${EXT_DIR}" "${SKILL_LINK_DIR}" "${SESSION_DIR}" "${SKILL_WS_DIR}"
+# 注册到 OpenClaw workspace/skills/，让 skill 扫描器发现（任意 IM 渠道可见）
+ln -sfn "${SCRIPT_DIR}/skills/video-edit-assistant" "${SKILL_WS_DIR}/video-edit-assistant"
 ln -sfn "${SCRIPT_DIR}/skills/video-edit-assistant" "${SKILL_LINK}"
 
 cat > "${EXT_DIR}/package.json" <<'EOF'
@@ -539,18 +542,20 @@ const TRIGGERS = ["/video-edit", "/video_edit", "video-edit:", "视频剪辑："
 const COMMAND_ALIASES = ["video_edit", "video_edit_assistant"];
 const MEDIA_EXT = /\\.(mp4|mov|m4v|webm|avi|mkv|jpg|jpeg|png|webp|gif|wav|mp3|m4a)$/i;
 const LOCAL_MEDIA_RE = /(?:file:\\/\\/)?(\\/[\\S'"<>]+\\.(?:mp4|mov|m4v|webm|avi|mkv|jpg|jpeg|png|webp|gif|wav|mp3|m4a))/gi;
+// IM 渠道 → session key 前缀映射；未知渠道直接用渠道名作前缀
+const CHANNEL_PREFIX = { telegram: "tg", feishu: "feishu", lark: "feishu", wxwork: "wxwork", wecom: "wxwork", slack: "slack", discord: "discord" };
 
 function textOf(event) {
   return String(event.bodyForAgent || event.body || event.transcript || event.content || "").trim();
 }
 
-function normalizeSender(senderId) {
-  const raw = String(senderId || "current");
-  return raw.replace(/^telegram:/, "").replace(/^tg:/, "");
-}
-
 function userKey(event, ctx) {
-  return "tg:" + normalizeSender(event.senderId || ctx.senderId || ctx.from);
+  const ch = String(event.channel || ctx.channel || "");
+  const prefix = CHANNEL_PREFIX[ch] || ch || "unk";
+  const raw = String(event.senderId || ctx.senderId || ctx.from || "user");
+  // 去掉 senderId 里可能自带的渠道前缀，避免 "tg:tg:12345" 这类双重前缀
+  const bare = raw.replace(/^(?:telegram|tg|feishu|lark|wxwork|wecom|slack|discord):/, "");
+  return prefix + ":" + bare;
 }
 
 function hasTrigger(text) {
@@ -580,9 +585,10 @@ function collectMediaPaths(event) {
 }
 
 async function hasDraft(sessionDir, key) {
-  const bareKey = String(key).replace(/^tg:/, "telegram-").replace(/^telegram:/, "telegram-");
   const safeKey = String(key).replace(/[^a-zA-Z0-9_.-]/g, "_");
-  const names = [key + ".json", safeKey + ".json", bareKey + ".json"];
+  const names = [key + ".json", safeKey + ".json"];
+  // Telegram 向后兼容：旧版 session 文件可能用 telegram-12345.json 格式
+  if (key.startsWith("tg:")) names.push("telegram-" + key.slice(3) + ".json");
   try {
     const entries = await readdir(sessionDir);
     return names.some((name) => entries.includes(name));
@@ -622,7 +628,7 @@ async function runBridge({ python, script, cwd, apiBase, uploadOss, sessionDir, 
 
 async function runCommandBridge(ctx, commandText) {
   const cfg = resolvedConfig(pluginConfigFromCommand(ctx));
-  const key = "tg:" + normalizeSender(ctx.senderId || ctx.from);
+  const key = userKey({ channel: ctx.channel || "" }, ctx);
   const result = await runBridge({ ...cfg, key, text: commandText, media: [] });
   return { text: result.reply_text || JSON.stringify(result) };
 }
@@ -633,7 +639,6 @@ function commandDef(name, nativeName = name.replaceAll("-", "_")) {
     nativeNames: { default: nativeName },
     nativeProgressMessages: { default: "处理中..." },
     description: "进入 Pixelle-Video 多轮自动剪辑流程",
-    channels: ["telegram"],
     acceptsArgs: true,
     requireAuth: true,
     async handler(ctx) {
@@ -649,15 +654,15 @@ function commandDef(name, nativeName = name.replaceAll("-", "_")) {
 
 export default definePluginEntry({
   id: "video-edit-router",
-  name: "Video Edit Telegram Router",
-  description: "Routes Telegram /video-edit turns into Pixelle-Video without invoking the LLM.",
+  name: "Video Edit IM Router",
+  description: "Routes /video-edit conversations from any IM channel (Telegram, Feishu, WeChat Work, Slack…) into Pixelle-Video without invoking the LLM.",
   register(api) {
     for (const alias of COMMAND_ALIASES) api.registerCommand(commandDef(alias, alias));
 
     api.on("inbound_claim", async (event, ctx) => {
       const rawCfg = event.context?.pluginConfig || ctx.pluginConfig || {};
       if (rawCfg.enabled === false) return;
-      if (event.channel !== "telegram") return;
+      // 不限制渠道：Telegram / 飞书 / 企业微信 / Slack / Discord 均可路由
 
       const text = textOf(event);
       const cfg = resolvedConfig(rawCfg);
@@ -690,7 +695,8 @@ export default definePluginEntry({
 EOF
 
 node --check "${EXT_DIR}/index.js"
-ok "OpenClaw Telegram router extension 已安装：${EXT_DIR}"
+ok "OpenClaw IM router extension 已安装：${EXT_DIR}"
+ok "Skill symlink 已安装：${SKILL_WS_DIR}/video-edit-assistant（OpenClaw skill 扫描目录）"
 ok "Skill symlink 已安装：${SKILL_LINK}"
 
 # 将 workspace extension 安装/刷新到 OpenClaw 全局插件目录，确保 gateway 能发现并加载。
@@ -705,10 +711,10 @@ else
   warn "未找到 openclaw CLI，跳过插件全局安装"
 fi
 
-# Telegram Bot 菜单命令注册。
-# 注意：Telegram Bot API 不允许命令名包含连字符，所以 /video-edit 不能出现在菜单中；
-# 这里注册合法的 /video_edit，并且 router 同时兼容用户手动输入 /video-edit。
-section "注册 Telegram Bot 指令菜单"
+# IM 渠道菜单注册
+# Telegram：调用 setMyCommands API 自动注册（Bot API 不允许命令名含连字符，使用 /video_edit）
+# 飞书 / 企业微信：需在各自开发者后台手动添加菜单指令，install 在此给出操作提示
+section "注册 IM 渠道指令菜单"
 python3 - <<'PYEOF'
 import json
 import os
@@ -757,6 +763,20 @@ except Exception as exc:
     print(f"WARN: Telegram setMyCommands 失败：{exc}", file=sys.stderr)
 PYEOF
 
+# ── 飞书 / 企业微信 菜单提示 ─────────────────────────────────────────────────
+# 这两个平台不支持通过 API 在安装时动态注册指令菜单，需在开发者后台手动操作一次。
+echo ""
+echo -e "${BLD}▸ 飞书（Lark）自定义机器人菜单（如已接入）：${RST}"
+echo "  1. 打开飞书开放平台 → 应用 → 机器人 → 菜单"
+echo "  2. 新建菜单项，名称：视频剪辑，发送文本：/video_edit"
+echo "  3. 发布应用版本后生效"
+echo ""
+echo -e "${BLD}▸ 企业微信（WeChat Work）自定义菜单（如已接入）：${RST}"
+echo "  1. 打开企业微信后台 → 应用 → 自定义应用 → 自定义菜单"
+echo "  2. 新建菜单，类型选「发送消息」，内容：/video_edit"
+echo "  3. 保存后在企业微信客户端中点击菜单即可触发 skill"
+echo ""
+info "以上 IM 渠道只需在后台手动配置一次；路由逻辑由 OpenClaw extension 自动处理，无需改代码。"
 
 # ── 9. 端到端冒烟测试 ────────────────────────────────────────────────────────
 section "端到端冒烟测试"
@@ -787,10 +807,17 @@ echo -e "  API 文档   : ${CYN}http://127.0.0.1:${API_PORT}/docs${RST}"
 echo -e "  配置文件   : ${CYN}${SCRIPT_DIR}/config.yaml${RST}"
 echo -e "  清理日志   : ${CYN}/tmp/pixelle-cleanup.log${RST}"
 echo ""
-echo -e "${BLD}openclaw 路由接入：${RST}"
-echo -e "  原生 Telegram router extension 已自动安装：${CYN}${EXT_DIR}${RST}"
-echo -e "  Skill symlink：${CYN}${SKILL_LINK}${RST}"
+echo -e "${BLD}openclaw 路由接入（任意 IM 渠道）：${RST}"
+echo -e "  IM router extension  ：${CYN}${EXT_DIR}${RST}"
+echo -e "  Skill（workspace）   ：${CYN}${SKILL_WS_DIR}/video-edit-assistant${RST}"
+echo -e "  Skill（agents）      ：${CYN}${SKILL_LINK}${RST}"
 echo -e "  外部 Bot 手动接入示例：${CYN}${ROUTE_SNIPPET_FILE}${RST}"
+echo ""
+echo -e "${BLD}支持的 IM 渠道：${RST}"
+echo -e "  Telegram      → 菜单 /video_edit 已自动注册"
+echo -e "  飞书 / Lark   → 在开发者后台手动添加菜单，发送文本：/video_edit"
+echo -e "  企业微信       → 在后台自定义菜单，类型：发送消息，内容：/video_edit"
+echo -e "  Slack / Discord 等 → 直接在对话中发送 /video_edit 触发"
 echo ""
 echo -e "${BLD}Telegram 验证方式：${RST}"
 echo -e "  在 Telegram 向 Bot 发送："
