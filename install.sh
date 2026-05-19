@@ -119,17 +119,101 @@ ok "Python 依赖安装完成"
 # ── 4. Playwright Chromium ───────────────────────────────────────────────────
 section "安装 Playwright Chromium（HTML 渲染）"
 
-if uv run python3 -c "
-from playwright.sync_api import sync_playwright
-with sync_playwright() as p:
-    b = p.chromium.launch(headless=True)
-    b.close()
-" 2>/dev/null; then
+# 查找系统中已安装的 Chrome/Chromium 可执行文件
+_find_system_chromium() {
+  for bin in google-chrome-stable google-chrome chromium chromium-browser; do
+    if command -v "$bin" &>/dev/null; then command -v "$bin"; return 0; fi
+  done
+  [[ -x "/Applications/Chromium.app/Contents/MacOS/Chromium" ]] \
+    && echo "/Applications/Chromium.app/Contents/MacOS/Chromium" && return 0
+  [[ -x "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" ]] \
+    && echo "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" && return 0
+  return 1
+}
+
+# 测试 Playwright Chromium 是否可正常启动（支持自定义可执行文件路径）
+_pw_chromium_ok() {
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="${PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH:-}" \
+  uv run python3 - <<'PYEOF' 2>/dev/null
+import os, sys
+ep = os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH', '')
+try:
+    from playwright.sync_api import sync_playwright
+    with sync_playwright() as p:
+        kw = {'executable_path': ep} if ep else {}
+        b = p.chromium.launch(headless=True, **kw)
+        b.close()
+    sys.exit(0)
+except Exception:
+    sys.exit(1)
+PYEOF
+}
+
+# 将 PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH 写入项目 .env（幂等）
+_write_chromium_env() {
+  local path="$1" env_file="${SCRIPT_DIR}/.env"
+  if [[ -f "$env_file" ]] && grep -q "^PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=" "$env_file"; then
+    python3 -c "
+import re, sys
+path = sys.argv[1]; f = '${env_file}'
+content = open(f).read()
+content = re.sub(r'^PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=.*$',
+                 'PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=' + path,
+                 content, flags=re.MULTILINE)
+open(f, 'w').write(content)
+" "$path"
+  else
+    echo "PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH=${path}" >> "$env_file"
+  fi
+}
+
+if _pw_chromium_ok; then
   ok "Playwright Chromium 已就绪"
 else
-  info "正在安装 Chromium …"
-  uv run playwright install chromium
-  ok "Playwright Chromium 安装完成"
+  info "正在安装 Playwright Chromium …"
+  PW_INSTALL_LOG="$(uv run playwright install chromium 2>&1)" && PW_OK=true || PW_OK=false
+
+  if [[ "$PW_OK" == "true" ]]; then
+    ok "Playwright Chromium 安装完成"
+  else
+    if echo "$PW_INSTALL_LOG" | grep -qi "does not support\|not supported"; then
+      warn "当前 OS 版本不在 Playwright 官方支持列表，尝试 --with-deps 方案 …"
+      uv run playwright install --with-deps chromium 2>/dev/null && PW_OK=true || true
+    fi
+
+    if [[ "$PW_OK" != "true" ]]; then
+      warn "Playwright 无法安装 Chromium，改用系统浏览器 …"
+      SYSTEM_CHROMIUM=""
+      if ! SYSTEM_CHROMIUM=$(_find_system_chromium 2>/dev/null); then
+        info "正在安装系统 Chromium …"
+        if [[ "$OS" == "Darwin" ]]; then
+          brew install --cask chromium 2>/dev/null || true
+        elif command -v snap &>/dev/null; then
+          sudo snap install chromium 2>/dev/null || true
+        elif command -v apt-get &>/dev/null; then
+          sudo apt-get install -y chromium-browser 2>/dev/null \
+            || sudo apt-get install -y chromium 2>/dev/null || true
+        elif command -v yum &>/dev/null; then
+          sudo yum install -y chromium 2>/dev/null || true
+        fi
+        SYSTEM_CHROMIUM=$(_find_system_chromium 2>/dev/null || echo "")
+      fi
+
+      if [[ -n "${SYSTEM_CHROMIUM:-}" ]] && [[ -x "$SYSTEM_CHROMIUM" ]]; then
+        export PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH="$SYSTEM_CHROMIUM"
+        _write_chromium_env "$SYSTEM_CHROMIUM"
+        ok "将使用系统 Chromium：${SYSTEM_CHROMIUM}"
+        if _pw_chromium_ok; then
+          ok "Playwright + 系统 Chromium 验证通过"
+        else
+          warn "Playwright 仍无法使用系统 Chromium，视频渲染可能受限"
+        fi
+      else
+        warn "未找到可用的 Chromium，视频渲染功能将不可用"
+        warn "可手动安装：sudo apt-get install -y chromium-browser"
+      fi
+    fi
+  fi
 fi
 
 # ── 5. 配置向导 ──────────────────────────────────────────────────────────────
@@ -258,6 +342,7 @@ ExecStart=${UV_BIN} run python api/app.py --host 127.0.0.1 --port ${API_PORT}
 Restart=always
 RestartSec=5
 Environment=PATH=${HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
+EnvironmentFile=-${SCRIPT_DIR}/.env
 
 [Install]
 WantedBy=multi-user.target
@@ -277,8 +362,12 @@ else
   # macOS / 无 systemd 环境：后台运行
   warn "当前环境无 systemd，以后台进程方式启动 API"
   pkill -f "python api/app.py" 2>/dev/null || true
-  nohup uv run python api/app.py --host 127.0.0.1 --port "$API_PORT" \
-    > /tmp/pixelle-video-api.log 2>&1 &
+  nohup bash -c "
+    set -a
+    [ -f '${SCRIPT_DIR}/.env' ] && . '${SCRIPT_DIR}/.env'
+    set +a
+    exec ${UV_BIN} run python api/app.py --host 127.0.0.1 --port ${API_PORT}
+  " > /tmp/pixelle-video-api.log 2>&1 &
   ok "API 后台进程已启动（日志：/tmp/pixelle-video-api.log）"
   sleep 4
 fi
@@ -375,6 +464,320 @@ PYEOF
 
 ok "接入示例已写入：${ROUTE_SNIPPET_FILE}"
 
+# ── 8.1 OpenClaw 原生 Telegram Router Extension ─────────────────────────────
+# 将 /video-edit 消息在进入 LLM 前拦截，直接调用本 skill 的 CLI。
+# 这一步是 OpenClaw 环境里的真正自动路由接入；上面的 Python 示例用于外部 Bot 手动集成。
+OPENCLAW_WORKSPACE="${HOME}/.openclaw/workspace"
+EXT_DIR="${OPENCLAW_WORKSPACE}/.openclaw/extensions/video-edit-router"
+SKILL_LINK_DIR="${HOME}/.agents/skills"
+SKILL_LINK="${SKILL_LINK_DIR}/video-edit-assistant"
+PYTHON_BIN="${SCRIPT_DIR}/.venv/bin/python"
+ROUTE_SCRIPT="${SCRIPT_DIR}/skills/video-edit-assistant/route_video_edit_message.py"
+SESSION_DIR="${OPENCLAW_WORKSPACE}/memory/video-edit-sessions"
+
+SKILL_WS_DIR="${OPENCLAW_WORKSPACE}/skills"
+mkdir -p "${EXT_DIR}" "${SKILL_LINK_DIR}" "${SESSION_DIR}" "${SKILL_WS_DIR}"
+# 注册到 OpenClaw workspace/skills/，让 skill 扫描器发现（任意 IM 渠道可见）
+ln -sfn "${SCRIPT_DIR}/skills/video-edit-assistant" "${SKILL_WS_DIR}/video-edit-assistant"
+ln -sfn "${SCRIPT_DIR}/skills/video-edit-assistant" "${SKILL_LINK}"
+
+cat > "${EXT_DIR}/package.json" <<'EOF'
+{
+  "name": "video-edit-router",
+  "version": "0.2.0",
+  "type": "module",
+  "openclaw": {
+    "extensions": ["./index.js"]
+  }
+}
+EOF
+
+cat > "${EXT_DIR}/openclaw.plugin.json" <<EOF
+{
+  "id": "video-edit-router",
+  "name": "Video Edit Telegram Router",
+  "version": "0.2.0",
+  "description": "Claims Telegram /video-edit conversations and routes them to the Pixelle-Video bridge.",
+  "entry": "./index.js",
+  "enabled": true,
+  "config": {
+    "python": "${PYTHON_BIN}",
+    "script": "${ROUTE_SCRIPT}",
+    "cwd": "${SCRIPT_DIR}",
+    "apiBase": "http://127.0.0.1:${API_PORT}",
+    "uploadOss": true,
+    "sessionDir": "${SESSION_DIR}"
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "enabled": { "type": "boolean" },
+      "python": { "type": "string" },
+      "script": { "type": "string" },
+      "cwd": { "type": "string" },
+      "apiBase": { "type": "string" },
+      "uploadOss": { "type": "boolean" },
+      "sessionDir": { "type": "string" }
+    }
+  }
+}
+EOF
+
+cat > "${EXT_DIR}/index.js" <<EOF
+import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
+import { existsSync } from "node:fs";
+import { readdir } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+
+const DEFAULT_PYTHON = ${PYTHON_BIN@Q};
+const DEFAULT_SCRIPT = ${ROUTE_SCRIPT@Q};
+const DEFAULT_CWD = ${SCRIPT_DIR@Q};
+const DEFAULT_API_BASE = "http://127.0.0.1:${API_PORT}";
+const DEFAULT_SESSION_DIR = ${SESSION_DIR@Q};
+const TRIGGERS = ["/video-edit", "/video_edit", "video-edit:", "视频剪辑："];
+const COMMAND_ALIASES = ["video_edit", "video_edit_assistant"];
+const MEDIA_EXT = /\\.(mp4|mov|m4v|webm|avi|mkv|jpg|jpeg|png|webp|gif|wav|mp3|m4a)$/i;
+const LOCAL_MEDIA_RE = /(?:file:\\/\\/)?(\\/[\\S'"<>]+\\.(?:mp4|mov|m4v|webm|avi|mkv|jpg|jpeg|png|webp|gif|wav|mp3|m4a))/gi;
+// IM 渠道 → session key 前缀映射；未知渠道直接用渠道名作前缀
+const CHANNEL_PREFIX = { telegram: "tg", feishu: "feishu", lark: "feishu", wxwork: "wxwork", wecom: "wxwork", slack: "slack", discord: "discord" };
+
+function textOf(event) {
+  return String(event.bodyForAgent || event.body || event.transcript || event.content || "").trim();
+}
+
+function userKey(event, ctx) {
+  const ch = String(event.channel || ctx.channel || "");
+  const prefix = CHANNEL_PREFIX[ch] || ch || "unk";
+  const raw = String(event.senderId || ctx.senderId || ctx.from || "user");
+  // 去掉 senderId 里可能自带的渠道前缀，避免 "tg:tg:12345" 这类双重前缀
+  const bare = raw.replace(/^(?:telegram|tg|feishu|lark|wxwork|wecom|slack|discord):/, "");
+  return prefix + ":" + bare;
+}
+
+function hasTrigger(text) {
+  const s = String(text || "").trim();
+  return TRIGGERS.some((prefix) => s.startsWith(prefix));
+}
+
+function collectStrings(value, out = []) {
+  if (typeof value === "string") out.push(value);
+  else if (Array.isArray(value)) for (const item of value) collectStrings(item, out);
+  else if (value && typeof value === "object") for (const item of Object.values(value)) collectStrings(item, out);
+  return out;
+}
+
+function collectMediaPaths(event) {
+  const seen = new Set();
+  const candidates = [];
+  for (const s of collectStrings(event)) {
+    if (MEDIA_EXT.test(s) && existsSync(s.replace(/^file:\\/\\//, ""))) candidates.push(s.replace(/^file:\\/\\//, ""));
+    for (const match of s.matchAll(LOCAL_MEDIA_RE)) candidates.push(match[1]);
+  }
+  return candidates.filter((p) => {
+    if (seen.has(p) || !existsSync(p)) return false;
+    seen.add(p);
+    return true;
+  });
+}
+
+async function hasDraft(sessionDir, key) {
+  const safeKey = String(key).replace(/[^a-zA-Z0-9_.-]/g, "_");
+  const names = [key + ".json", safeKey + ".json"];
+  // Telegram 向后兼容：旧版 session 文件可能用 telegram-12345.json 格式
+  if (key.startsWith("tg:")) names.push("telegram-" + key.slice(3) + ".json");
+  try {
+    const entries = await readdir(sessionDir);
+    return names.some((name) => entries.includes(name));
+  } catch {
+    return false;
+  }
+}
+
+function pluginConfigFromCommand(ctx) {
+  return ctx?.config?.plugins?.entries?.["video-edit-router"]?.config || {};
+}
+
+function resolvedConfig(raw = {}) {
+  return {
+    python: String(raw.python || DEFAULT_PYTHON),
+    script: String(raw.script || DEFAULT_SCRIPT),
+    cwd: String(raw.cwd || DEFAULT_CWD),
+    apiBase: String(raw.apiBase || DEFAULT_API_BASE),
+    uploadOss: raw.uploadOss !== false,
+    sessionDir: String(raw.sessionDir || DEFAULT_SESSION_DIR),
+  };
+}
+
+async function runBridge({ python, script, cwd, apiBase, uploadOss, sessionDir, key, text, media }) {
+  const args = [script, "--user-key", key, "--text", text, "--api-base", apiBase, "--pretty"];
+  if (uploadOss) args.push("--upload-oss");
+  for (const path of media) args.push("--media", path);
+
+  const { stdout } = await execFileAsync(python, args, {
+    cwd,
+    env: { ...process.env, VIDEO_EDIT_SESSION_DIR: sessionDir },
+    maxBuffer: 20 * 1024 * 1024,
+    timeout: 20 * 60 * 1000,
+  });
+  return JSON.parse(stdout);
+}
+
+async function runCommandBridge(ctx, commandText) {
+  const cfg = resolvedConfig(pluginConfigFromCommand(ctx));
+  const key = userKey({ channel: ctx.channel || "" }, ctx);
+  const result = await runBridge({ ...cfg, key, text: commandText, media: [] });
+  return { text: result.reply_text || JSON.stringify(result) };
+}
+
+function commandDef(name, nativeName = name.replaceAll("-", "_")) {
+  return {
+    name,
+    nativeNames: { default: nativeName },
+    nativeProgressMessages: { default: "处理中..." },
+    description: "进入 Pixelle-Video 多轮自动剪辑流程",
+    acceptsArgs: true,
+    requireAuth: true,
+    async handler(ctx) {
+      try {
+        const commandText = "/video-edit" + (ctx.args ? " " + ctx.args : "");
+        return await runCommandBridge(ctx, commandText);
+      } catch (error) {
+        return { text: "视频剪辑桥接执行失败：" + (error?.message || String(error)), isError: true };
+      }
+    },
+  };
+}
+
+export default definePluginEntry({
+  id: "video-edit-router",
+  name: "Video Edit IM Router",
+  description: "Routes /video-edit conversations from any IM channel (Telegram, Feishu, WeChat Work, Slack…) into Pixelle-Video without invoking the LLM.",
+  register(api) {
+    for (const alias of COMMAND_ALIASES) api.registerCommand(commandDef(alias, alias));
+
+    api.on("inbound_claim", async (event, ctx) => {
+      const rawCfg = event.context?.pluginConfig || ctx.pluginConfig || {};
+      if (rawCfg.enabled === false) return;
+      // 不限制渠道：Telegram / 飞书 / 企业微信 / Slack / Discord 均可路由
+
+      const text = textOf(event);
+      const cfg = resolvedConfig(rawCfg);
+      const key = userKey(event, ctx);
+      const shouldHandle = hasTrigger(text) || await hasDraft(cfg.sessionDir, key);
+      if (!shouldHandle) return;
+
+      try {
+        const result = await runBridge({ ...cfg, key, text, media: collectMediaPaths(event) });
+        return {
+          handled: true,
+          reply: {
+            text: result.reply_text || JSON.stringify(result),
+            replyToId: event.messageId ? String(event.messageId) : undefined,
+          },
+        };
+      } catch (error) {
+        return {
+          handled: true,
+          reply: {
+            text: "视频剪辑桥接执行失败：" + (error?.message || String(error)),
+            replyToId: event.messageId ? String(event.messageId) : undefined,
+            isError: true,
+          },
+        };
+      }
+    }, { priority: 100, timeoutMs: 600000 });
+  },
+});
+EOF
+
+node --check "${EXT_DIR}/index.js"
+ok "OpenClaw IM router extension 已安装：${EXT_DIR}"
+ok "Skill symlink 已安装：${SKILL_WS_DIR}/video-edit-assistant（OpenClaw skill 扫描目录）"
+ok "Skill symlink 已安装：${SKILL_LINK}"
+
+# 将 workspace extension 安装/刷新到 OpenClaw 全局插件目录，确保 gateway 能发现并加载。
+if command -v openclaw >/dev/null 2>&1; then
+  info "正在安装/刷新 OpenClaw video-edit-router 插件…"
+  if openclaw plugins install --force "${EXT_DIR}" >/tmp/video-edit-router-plugin-install.log 2>&1; then
+    ok "OpenClaw 插件已安装/刷新：video-edit-router"
+  else
+    warn "OpenClaw 插件安装命令失败，请检查 /tmp/video-edit-router-plugin-install.log"
+  fi
+else
+  warn "未找到 openclaw CLI，跳过插件全局安装"
+fi
+
+# IM 渠道菜单注册
+# Telegram：调用 setMyCommands API 自动注册（Bot API 不允许命令名含连字符，使用 /video_edit）
+# 飞书 / 企业微信：需在各自开发者后台手动添加菜单指令，install 在此给出操作提示
+section "注册 IM 渠道指令菜单"
+python3 - <<'PYEOF'
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+config_path = Path.home() / ".openclaw" / "openclaw.json"
+token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+if not token and config_path.exists():
+    try:
+        cfg = json.loads(config_path.read_text())
+        token = str(((cfg.get("channels") or {}).get("telegram") or {}).get("botToken") or "").strip()
+    except Exception as exc:
+        print(f"WARN: 读取 OpenClaw Telegram 配置失败：{exc}", file=sys.stderr)
+
+if not token:
+    print("WARN: 未找到 Telegram bot token，跳过 setMyCommands", file=sys.stderr)
+    sys.exit(0)
+
+commands = [
+    {
+        "command": "video_edit",
+        "description": "进入 Pixelle-Video 自动剪辑流程",
+    }
+]
+payload = json.dumps({"commands": commands, "scope": {"type": "default"}}, ensure_ascii=False).encode("utf-8")
+req = urllib.request.Request(
+    f"https://api.telegram.org/bot{token}/setMyCommands",
+    data=payload,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+try:
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        body = json.loads(resp.read().decode("utf-8"))
+    if body.get("ok"):
+        print("OK: Telegram Bot 菜单命令已注册：/video_edit")
+    else:
+        print("WARN: Telegram setMyCommands 返回失败：" + json.dumps(body, ensure_ascii=False), file=sys.stderr)
+except urllib.error.HTTPError as exc:
+    detail = exc.read().decode("utf-8", "replace")
+    print(f"WARN: Telegram setMyCommands HTTP {exc.code}: {detail}", file=sys.stderr)
+except Exception as exc:
+    print(f"WARN: Telegram setMyCommands 失败：{exc}", file=sys.stderr)
+PYEOF
+
+# ── 飞书 / 企业微信 菜单提示 ─────────────────────────────────────────────────
+# 这两个平台不支持通过 API 在安装时动态注册指令菜单，需在开发者后台手动操作一次。
+echo ""
+echo -e "${BLD}▸ 飞书（Lark）自定义机器人菜单（如已接入）：${RST}"
+echo "  1. 打开飞书开放平台 → 应用 → 机器人 → 菜单"
+echo "  2. 新建菜单项，名称：视频剪辑，发送文本：/video_edit"
+echo "  3. 发布应用版本后生效"
+echo ""
+echo -e "${BLD}▸ 企业微信（WeChat Work）自定义菜单（如已接入）：${RST}"
+echo "  1. 打开企业微信后台 → 应用 → 自定义应用 → 自定义菜单"
+echo "  2. 新建菜单，类型选「发送消息」，内容：/video_edit"
+echo "  3. 保存后在企业微信客户端中点击菜单即可触发 skill"
+echo ""
+info "以上 IM 渠道只需在后台手动配置一次；路由逻辑由 OpenClaw extension 自动处理，无需改代码。"
+
 # ── 9. 端到端冒烟测试 ────────────────────────────────────────────────────────
 section "端到端冒烟测试"
 
@@ -386,7 +789,7 @@ else
   if uv run python3 skills/video-edit-assistant/e2e_test.py \
        --asset "$DEMO_ASSET" \
        --text "安装验证视频，请忽略。" \
-       --mode single 2>&1 | grep -E "PASS|FAIL|OSS|error"; then
+       --skill-mode quick_create 2>&1 | grep -E "PASS|FAIL|OSS|error"; then
     ok "冒烟测试完成"
   else
     warn "冒烟测试输出异常，请手动检查"
@@ -404,11 +807,17 @@ echo -e "  API 文档   : ${CYN}http://127.0.0.1:${API_PORT}/docs${RST}"
 echo -e "  配置文件   : ${CYN}${SCRIPT_DIR}/config.yaml${RST}"
 echo -e "  清理日志   : ${CYN}/tmp/pixelle-cleanup.log${RST}"
 echo ""
-echo -e "${BLD}openclaw 路由接入：${RST}"
-echo -e "  将 ${CYN}skills/video-edit-assistant/openclaw_router.py${RST} 中的"
-echo -e "  ${CYN}handle_telegram_update()${RST} 或 ${CYN}handle_telegram_update_async()${RST}"
-echo -e "  添加到 openclaw 的 Telegram Bot 消息处理器"
-echo -e "  详见：${CYN}${ROUTE_SNIPPET_FILE}${RST}"
+echo -e "${BLD}openclaw 路由接入（任意 IM 渠道）：${RST}"
+echo -e "  IM router extension  ：${CYN}${EXT_DIR}${RST}"
+echo -e "  Skill（workspace）   ：${CYN}${SKILL_WS_DIR}/video-edit-assistant${RST}"
+echo -e "  Skill（agents）      ：${CYN}${SKILL_LINK}${RST}"
+echo -e "  外部 Bot 手动接入示例：${CYN}${ROUTE_SNIPPET_FILE}${RST}"
+echo ""
+echo -e "${BLD}支持的 IM 渠道：${RST}"
+echo -e "  Telegram      → 菜单 /video_edit 已自动注册"
+echo -e "  飞书 / Lark   → 在开发者后台手动添加菜单，发送文本：/video_edit"
+echo -e "  企业微信       → 在后台自定义菜单，类型：发送消息，内容：/video_edit"
+echo -e "  Slack / Discord 等 → 直接在对话中发送 /video_edit 触发"
 echo ""
 echo -e "${BLD}Telegram 验证方式：${RST}"
 echo -e "  在 Telegram 向 Bot 发送："
