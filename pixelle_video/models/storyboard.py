@@ -53,6 +53,12 @@ class StoryboardConfig:
     frame_template: str = "1080x1920/default.html"  # Template path with size (e.g., "1080x1920/default.html")
     template_params: Optional[Dict[str, Any]] = None  # Custom template parameters (e.g., {"accent_color": "#ff0000"})
 
+    # Subtitle configuration
+    subtitle_mode: str = "html"        # "html": rendered in template; "moviepy": PIL overlay via MoviePy
+    subtitle_color: str = "#FFFFFF"
+    subtitle_font_size: int = 40
+    subtitle_max_chars: int = 16       # max Chinese characters per subtitle line
+
 
 @dataclass
 class StoryboardFrame:

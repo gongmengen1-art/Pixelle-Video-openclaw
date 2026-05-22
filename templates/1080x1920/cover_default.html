@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="template:media-width" content="1024">
+    <meta name="template:media-height" content="1024">
+    <style>
+        html { margin: 0; padding: 0; }
+        body {
+            margin: 0; padding: 0;
+            width: 1080px; height: 1920px;
+            font-family: 'PingFang SC', 'Source Han Sans', 'Microsoft YaHei', 'Noto Sans CJK SC', sans-serif;
+            overflow: hidden;
+        }
+        .page-container {
+            width: 1080px; height: 1920px;
+            position: relative; overflow: hidden;
+            background: #0a0a0a;
+        }
+
+        /* Full-bleed background image */
+        .background-layer {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%; z-index: 0;
+        }
+        .background-layer img {
+            width: 100%; height: 100%;
+            object-fit: cover; display: block;
+        }
+
+        /* Gradient: subtle top vignette + strong bottom for title legibility */
+        .gradient-overlay {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%; z-index: 1;
+            background: linear-gradient(to bottom,
+                rgba(0, 0, 0, 0.25) 0%,
+                rgba(0, 0, 0, 0.05) 35%,
+                rgba(0, 0, 0, 0.05) 55%,
+                rgba(0, 0, 0, 0.70) 78%,
+                rgba(0, 0, 0, 0.88) 100%);
+        }
+
+        /* Title positioned at bottom */
+        .content-layer {
+            position: absolute; z-index: 2;
+            width: 100%; height: 100%;
+            display: flex; flex-direction: column;
+            justify-content: flex-end;
+            padding: 0 80px 160px 80px;
+            box-sizing: border-box;
+        }
+        .cover-title {
+            font-size: 88px; font-weight: 800;
+            line-height: 1.25; color: #ffffff;
+            text-align: center;
+            text-shadow: 0 4px 24px rgba(0, 0, 0, 0.7);
+            letter-spacing: 0.02em;
+        }
+    </style>
+</head>
+<body>
+    <div class="page-container">
+        <div class="background-layer" id="bg-layer"></div>
+        <div class="gradient-overlay"></div>
+        <div class="content-layer">
+            <div class="cover-title">{{title}}</div>
+        </div>
+    </div>
+    <script>
+        (function () {
+            var imageUrl = "{{image}}";
+            var bgLayer = document.getElementById('bg-layer');
+            if (imageUrl && imageUrl.trim() !== "" && imageUrl !== "None") {
+                var img = document.createElement('img');
+                img.src = imageUrl;
+                img.alt = "";
+                bgLayer.appendChild(img);
+            }
+        })();
+    </script>
+</body>
+</html>

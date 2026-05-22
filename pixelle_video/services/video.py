@@ -674,6 +674,57 @@ class VideoService:
             logger.error(f"FFmpeg error creating video from image: {error_msg}")
             raise RuntimeError(f"Failed to create video from image: {error_msg}")
     
+    def create_still_video_with_silence(
+        self,
+        image: str,
+        output: str,
+        duration: float = 3.0,
+        fps: int = 30,
+    ) -> str:
+        """
+        Create a short still video from an image with a silent audio track.
+
+        Used to produce the cover intro segment that can be concatenated with
+        the rest of the video without audio-stream mismatches.
+
+        Args:
+            image: Input image file path
+            output: Output video file path
+            duration: Video duration in seconds (default 3.0)
+            fps: Video frame rate
+
+        Returns:
+            Path to the output video
+        """
+        self._ensure_ffmpeg()
+        try:
+            input_image = ffmpeg.input(image, loop=1, framerate=fps)
+            input_silence = ffmpeg.input('anullsrc=r=44100:cl=stereo', format='lavfi')
+            (
+                ffmpeg
+                .output(
+                    input_image,
+                    input_silence,
+                    output,
+                    t=duration,
+                    vcodec='libx264',
+                    acodec='aac',
+                    pix_fmt='yuv420p',
+                    preset='medium',
+                    crf=23,
+                    audio_bitrate='128k',
+                    **{'b:v': '2M'},
+                )
+                .overwrite_output()
+                .run(capture_stdout=True, capture_stderr=True)
+            )
+            logger.debug(f"Cover still video created: {output} ({duration:.1f}s)")
+            return output
+        except ffmpeg.Error as e:
+            error_msg = e.stderr.decode() if e.stderr else str(e)
+            logger.error(f"FFmpeg error creating still video: {error_msg}")
+            raise RuntimeError(f"Failed to create still video: {error_msg}")
+
     def add_bgm(
         self,
         video: str,

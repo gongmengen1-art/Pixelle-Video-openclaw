@@ -55,6 +55,12 @@ async def generate_scripted_asset_edit_sync(
             ref_audio=request_body.ref_audio,
             voice_id=request_body.voice_id,
             tts_speed=request_body.tts_speed,
+            cover_enabled=request_body.cover_enabled,
+            cover_title=request_body.cover_title,
+            cover_ref_image=request_body.cover_ref_image,
+            subtitle_color=request_body.subtitle_color,
+            subtitle_font_size=request_body.subtitle_font_size,
+            subtitle_max_chars=request_body.subtitle_max_chars,
         )
 
         file_size = os.path.getsize(result_ctx.final_video_path) if os.path.exists(result_ctx.final_video_path) else 0
@@ -67,8 +73,14 @@ async def generate_scripted_asset_edit_sync(
         except Exception:
             duration = getattr(result_ctx.storyboard, "total_duration", 0.0) if getattr(result_ctx, "storyboard", None) else 0.0
 
+        cover_image_url = None
+        cover_path = getattr(result_ctx, 'cover_image_path', None)
+        if cover_path and os.path.exists(cover_path):
+            cover_image_url = path_to_url(request, cover_path)
+
         return ScriptedAssetEditResponse(
             video_url=video_url,
+            cover_image_url=cover_image_url,
             duration=duration,
             file_size=file_size,
         )

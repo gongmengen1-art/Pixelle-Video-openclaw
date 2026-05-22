@@ -140,7 +140,20 @@ class FrameProcessor:
                 ))
             
             await self._step_create_video_segment(frame, config)
-            
+
+            # Step 5: MoviePy subtitle overlay (custom_assets mode with subtitle_mode='moviepy')
+            if config.subtitle_mode == 'moviepy' and frame.narration and frame.narration.strip():
+                if progress_callback:
+                    progress_callback(ProgressEvent(
+                        event_type="frame_step",
+                        progress=0.90,
+                        frame_current=frame_num,
+                        frame_total=total_frames,
+                        step=5,
+                        action="subtitle"
+                    ))
+                await self._step_add_subtitle_moviepy(frame, config)
+
             logger.info(f"✅ Frame {frame.index} completed")
             return frame
 
@@ -320,9 +333,12 @@ class FrameProcessor:
         media_path = frame.video_path if frame.media_type == "video" else frame.image_path
         logger.debug(f"Generating frame with media: '{media_path}' (type: {frame.media_type})")
         
+        # When using MoviePy subtitle overlay, suppress subtitle text in the HTML template
+        narration_for_template = '' if config.subtitle_mode == 'moviepy' else frame.narration
+
         composed_path = await generator.generate_frame(
             title=storyboard.title,
-            text=frame.narration,
+            text=narration_for_template,
             image=media_path,  # HTMLFrameGenerator handles both image and video paths
             ext=ext,
             output_path=output_path
@@ -433,6 +449,32 @@ class FrameProcessor:
         
         return output_path
     
+    async def _step_add_subtitle_moviepy(
+        self,
+        frame: StoryboardFrame,
+        config: StoryboardConfig,
+    ):
+        """Step 5: Overlay subtitles using MoviePy + PIL (custom_assets mode only)."""
+        logger.debug(f"  5/5: Adding MoviePy subtitle for frame {frame.index}...")
+
+        from pixelle_video.utils.os_util import get_task_frame_path
+        from pixelle_video.utils.subtitle_util import add_subtitle_moviepy
+
+        output_path = get_task_frame_path(config.task_id, frame.index, "segment") + "_sub.mp4"
+        subtitle_config = {
+            'font_size': config.subtitle_font_size,
+            'color':     config.subtitle_color,
+            'max_chars': config.subtitle_max_chars,
+        }
+        result = add_subtitle_moviepy(
+            video_path=frame.video_segment_path,
+            narration=frame.narration,
+            subtitle_config=subtitle_config,
+            output_path=output_path,
+        )
+        frame.video_segment_path = result
+        logger.debug(f"  ✓ Subtitle overlay: {result}")
+
     async def _get_video_duration(self, video_path: str) -> float:
         """Get video duration in seconds"""
         try:
