@@ -528,10 +528,8 @@ cat > "${EXT_DIR}/index.js" <<EOF
 import { definePluginEntry } from "openclaw/plugin-sdk/plugin-entry";
 import { existsSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import { spawn } from "node:child_process";
+import { createInterface } from "node:readline";
 
 const DEFAULT_PYTHON = ${PYTHON_BIN@Q};
 const DEFAULT_SCRIPT = ${ROUTE_SCRIPT@Q};
@@ -612,18 +610,64 @@ function resolvedConfig(raw = {}) {
   };
 }
 
-async function runBridge({ python, script, cwd, apiBase, uploadOss, sessionDir, key, text, media }) {
-  const args = [script, "--user-key", key, "--text", text, "--api-base", apiBase, "--pretty"];
+// Progress bar renderer: "▓▓▓▓░░░░░░ 40%"
+function progressBar(pct) {
+  const filled = Math.min(10, Math.floor(pct / 10));
+  return "▓".repeat(filled) + "░".repeat(10 - filled) + " " + pct + "%";
+}
+
+function buildProgressText(pct, msg) {
+  const bar = progressBar(pct);
+  const lines = ["⏳ 视频生成中...", bar];
+  if (msg) lines.push(msg);
+  return lines.join("\\n");
+}
+
+// Run the Python bridge using spawn so we can process NDJSON lines in real-time.
+// progress lines: {"type":"progress","pct":<int>,"msg":"..."}
+// final line:     any JSON object without "type":"progress"
+async function runBridge({ python, script, cwd, apiBase, uploadOss, sessionDir, key, text, media, onProgress }) {
+  const args = [script, "--user-key", key, "--text", text, "--api-base", apiBase];
   if (uploadOss) args.push("--upload-oss");
   for (const path of media) args.push("--media", path);
 
-  const { stdout } = await execFileAsync(python, args, {
-    cwd,
-    env: { ...process.env, VIDEO_EDIT_SESSION_DIR: sessionDir },
-    maxBuffer: 20 * 1024 * 1024,
-    timeout: 20 * 60 * 1000,
+  return new Promise((resolve, reject) => {
+    const child = spawn(python, args, {
+      cwd,
+      env: { ...process.env, VIDEO_EDIT_SESSION_DIR: sessionDir },
+      timeout: 20 * 60 * 1000,
+    });
+
+    let finalResult = null;
+    const rl = createInterface({ input: child.stdout, crlfDelay: Infinity });
+
+    rl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let obj;
+      try { obj = JSON.parse(trimmed); } catch { return; }
+      if (obj && obj.type === "progress") {
+        if (onProgress) onProgress(obj);
+      } else {
+        finalResult = obj;
+      }
+    });
+
+    let stderrBuf = "";
+    child.stderr.on("data", (d) => { stderrBuf += d.toString(); });
+
+    child.on("error", reject);
+    child.on("close", (code) => {
+      rl.close();
+      if (finalResult) {
+        resolve(finalResult);
+      } else if (code !== 0) {
+        reject(new Error("Bridge exited with code " + code + ": " + stderrBuf.slice(-500)));
+      } else {
+        reject(new Error("Bridge produced no result. stderr: " + stderrBuf.slice(-500)));
+      }
+    });
   });
-  return JSON.parse(stdout);
 }
 
 async function runCommandBridge(ctx, commandText) {
@@ -631,6 +675,24 @@ async function runCommandBridge(ctx, commandText) {
   const key = userKey({ channel: ctx.channel || "" }, ctx);
   const result = await runBridge({ ...cfg, key, text: commandText, media: [] });
   return { text: result.reply_text || JSON.stringify(result) };
+}
+
+// ── Telegram progress helpers ──────────────────────────────────────────────
+// Attempt to send / edit a Telegram progress message.
+// We try ctx.telegram?.editMessageText when we have a message_id, else ctx.reply.
+// All calls are fire-and-forget; failures are silently ignored.
+async function _tgSendProgress(ctx, chatId, msgId, text) {
+  try {
+    if (msgId && chatId && ctx.telegram && ctx.telegram.editMessageText) {
+      await ctx.telegram.editMessageText(chatId, msgId, undefined, text);
+    } else if (ctx.reply) {
+      await ctx.reply(text);
+    }
+  } catch (_) { /* best-effort */ }
+}
+
+function _tgChatId(event, ctx) {
+  return event.chatId || event.chat?.id || ctx.chat?.id || ctx.chatId || null;
 }
 
 function commandDef(name, nativeName = name.replaceAll("-", "_")) {
@@ -671,7 +733,37 @@ export default definePluginEntry({
       if (!shouldHandle) return;
 
       try {
-        const result = await runBridge({ ...cfg, key, text, media: collectMediaPaths(event) });
+        // Telegram-only: track progress message for live editing
+        const isTelegram = String(event.channel || "").toLowerCase() === "telegram";
+        const chatId = isTelegram ? _tgChatId(event, ctx) : null;
+        let progressMsgId = null;
+
+        const result = await runBridge({
+          ...cfg, key, text, media: collectMediaPaths(event),
+          onProgress: ({ pct, msg }) => {
+            if (!isTelegram) return;
+            const progressText = buildProgressText(pct, msg);
+            (async () => {
+              try {
+                if (!progressMsgId && chatId && ctx.reply) {
+                  // First progress update: send initial message and capture its id
+                  const sent = await ctx.reply(progressText);
+                  if (sent?.message_id) progressMsgId = sent.message_id;
+                } else {
+                  await _tgSendProgress(ctx, chatId, progressMsgId, progressText);
+                }
+              } catch (_) { /* ignore */ }
+            })();
+          },
+        });
+
+        // Edit or send final reply for Telegram when we have a progress message
+        if (isTelegram && progressMsgId && chatId) {
+          const finalText = result.reply_text || JSON.stringify(result);
+          await _tgSendProgress(ctx, chatId, progressMsgId, finalText);
+          return { handled: true };  // message already sent via edit
+        }
+
         return {
           handled: true,
           reply: {

@@ -20,8 +20,12 @@ TRIGGER_PREFIXES = ('/video-edit', '/video_edit', 'video-edit:', '视频剪辑�
 # API endpoints per mode
 _API_ROUTES = {
     MODE_QUICK_CREATE:  '/api/video/generate/sync',
-    MODE_CUSTOM_ASSETS: '/api/video/scripted-asset-edit/sync',
+    MODE_CUSTOM_ASSETS: '/api/video/scripted-asset-edit/sync',  # kept as fallback
 }
+# Async endpoint for custom_assets: returns task_id immediately for progress polling
+_ASYNC_ROUTE_CUSTOM_ASSETS = '/api/video/scripted-asset-edit/async'
+# Task status endpoint: GET /api/tasks/{task_id}
+_TASKS_STATUS_ROUTE = '/api/tasks/{task_id}'
 
 # Keywords that trigger a full session reset
 _RESET_KEYWORDS = ('重新开始', '重置', '清空', '重来', '取消', '/reset', 'restart', 'reset')
@@ -491,6 +495,118 @@ def _resolve_video_local_path(video_url: str, output_base: str) -> Path | None:
     return candidate if candidate.exists() else None
 
 
+# ── Path-to-URL conversion (mirrors api/routers/video.py path_to_url) ──────
+
+def _path_to_url(file_path: str, api_base: str) -> str:
+    """Convert an absolute file path to a URL using the known api_base."""
+    normalized = file_path.replace('\\', '/')
+    parts = normalized.split('/')
+    try:
+        idx = parts.index('output')
+        relative = '/'.join(parts[idx + 1:])
+    except ValueError:
+        from pathlib import Path
+        relative = Path(file_path).name
+    return api_base.rstrip('/') + '/api/files/' + relative
+
+
+# ── Async execution for custom_assets (with progress streaming) ─────────────
+
+def _execute_api_async_custom(payload: dict, api_base: str, cfg: dict, upload_oss: bool) -> dict:
+    """
+    Call the async scripted-asset-edit endpoint, poll for progress, and stream
+    JSON progress lines to stdout so the JS plugin can update Telegram messages.
+
+    Each progress line written to stdout has {"type":"progress","pct":<int>,"msg":"..."}.
+    The final result is returned (not written to stdout — the caller does that).
+    """
+    import sys
+    import time
+    import urllib.request
+
+    # ── Step 1: Submit async job ──────────────────────────────────────────────
+    clean = {k: v for k, v in payload.items() if not k.startswith('_')}
+    async_url = api_base.rstrip('/') + _ASYNC_ROUTE_CUSTOM_ASSETS
+    req = urllib.request.Request(
+        async_url,
+        data=json.dumps(clean).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST',
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            submit = json.loads(resp.read().decode('utf-8'))
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode('utf-8', errors='replace')
+        try:
+            detail = json.loads(body).get('detail', body)
+        except Exception:
+            detail = body
+        return {'status': 'api_error', 'http_status': exc.code, 'message': detail}
+    except Exception as exc:
+        return {'status': 'api_error', 'message': str(exc)}
+
+    task_id = submit.get('task_id')
+    if not task_id:
+        return {'status': 'api_error', 'message': 'No task_id returned from async endpoint'}
+
+    # ── Step 2: Poll task status ──────────────────────────────────────────────
+    status_url = api_base.rstrip('/') + _TASKS_STATUS_ROUTE.format(task_id=task_id)
+    last_pct = -1
+    poll_interval = 4  # seconds
+
+    while True:
+        time.sleep(poll_interval)
+        try:
+            with urllib.request.urlopen(status_url, timeout=10) as resp:
+                task_data = json.loads(resp.read().decode('utf-8'))
+        except Exception:
+            continue
+
+        status = task_data.get('status', 'running')
+        progress = task_data.get('progress') or {}
+        pct = int(progress.get('percentage', 0))
+        msg = progress.get('message', '')
+
+        # Emit progress line if percentage changed
+        if status in ('pending', 'running') and pct != last_pct:
+            print(json.dumps({'type': 'progress', 'pct': pct, 'msg': msg}, ensure_ascii=False), flush=True)
+            last_pct = pct
+
+        if status == 'completed':
+            raw = task_data.get('result') or {}
+            response = {
+                'video_url':       _path_to_url(raw['video_path'], api_base) if raw.get('video_path') else '',
+                'cover_image_url': _path_to_url(raw['cover_image_path'], api_base) if raw.get('cover_image_path') else None,
+                'duration':        raw.get('duration', 0.0),
+                'file_size':       raw.get('file_size', 0),
+            }
+            result: dict[str, Any] = {'api_url': status_url, 'response': response}
+
+            if upload_oss:
+                output_base = cfg.get('output_base', '')
+                video_url = response.get('video_url', '')
+                local_file = _resolve_video_local_path(video_url, output_base)
+                if local_file:
+                    task_id_dir = local_file.parent.name
+                    oss_prefix = cfg.get('oss', {}).get('prefix', 'openclaw/video-edit/')
+                    object_key = f'{oss_prefix}{task_id_dir}.mp4'
+                    result['oss'] = upload_file_to_oss(local_file, object_key=object_key)
+                    if result['oss'].get('status') == 200:
+                        cleanup_task_dir(local_file.parent)
+                else:
+                    result['oss_skip_reason'] = f'local file not found for: {video_url}'
+
+            return result
+
+        if status == 'failed':
+            error = task_data.get('error') or 'Generation failed'
+            return {'status': 'api_error', 'message': error}
+
+        if status == 'cancelled':
+            return {'status': 'api_error', 'message': 'Task was cancelled'}
+
+
 # ── API routing per mode ───────────────────────────────────────────────────
 
 def _execute_api(payload: dict, api_base: str, cfg: dict, upload_oss: bool) -> dict:
@@ -508,6 +624,10 @@ def _execute_api(payload: dict, api_base: str, cfg: dict, upload_oss: bool) -> d
             'status': 'unsupported',
             'message': f'{label} 需要 ComfyUI 支持，功能即将上线。',
         }
+
+    # custom_assets uses the async endpoint so the JS plugin can receive progress
+    if mode == MODE_CUSTOM_ASSETS:
+        return _execute_api_async_custom(payload, api_base, cfg, upload_oss)
 
     route = _API_ROUTES[mode]
     # Strip internal routing hints before POST

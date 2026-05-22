@@ -33,10 +33,14 @@ def main() -> int:
         upload_oss=args.upload_oss,
     )
 
-    if args.pretty:
+    # Always write final result as a compact single-line JSON so the JS plugin
+    # can identify it as the last NDJSON record (progress lines use compact JSON too).
+    # --pretty only affects indentation of the final line for human readability when
+    # running the script manually; the JS plugin uses the compact form via spawn+readline.
+    if args.pretty and sys.stdout.isatty():
         print(json.dumps(result, ensure_ascii=False, indent=2))
     else:
-        print(json.dumps(result, ensure_ascii=False))
+        print(json.dumps(result, ensure_ascii=False), flush=True)
     return 0
 
 
