@@ -19,6 +19,7 @@ front-end semantics from "generate a marketing video from intent" to
 "edit a demo video from provided script + provided assets".
 """
 
+import os
 from pathlib import Path
 from typing import Any, Optional, Callable
 
@@ -27,6 +28,7 @@ from pydantic import BaseModel, Field
 
 from pixelle_video.pipelines.asset_based import AssetBasedPipeline
 from pixelle_video.models.progress import ProgressEvent
+from pixelle_video.models.storyboard import StoryboardFrame
 
 ProgressCallback = Optional[Callable[[ProgressEvent], None]]
 
@@ -303,6 +305,32 @@ class ScriptedAssetEditPipeline(AssetBasedPipeline):
     async def initialize_storyboard(self, context):
         await super().initialize_storyboard(context)
 
+        # Apply user's chosen frame template (base class hardcodes a default)
+        frame_template = context.request.get("frame_template", "1080x1920/asset_default.html")
+        if frame_template:
+            context.config.frame_template = frame_template
+            # Re-derive media dimensions from the actual template
+            try:
+                from pixelle_video.utils.template_util import parse_template_size, resolve_template_path
+                tmpl_path = resolve_template_path(frame_template)
+                w, h = parse_template_size(tmpl_path)
+                context.config.media_width = w
+                context.config.media_height = h
+            except Exception as e:
+                logger.warning(f"Could not parse media size from template '{frame_template}': {e}")
+
+        # Subtitle configuration: custom_assets always uses MoviePy overlay
+        context.config.subtitle_mode = 'moviepy'
+        context.config.subtitle_color = str(
+            context.request.get("subtitle_color") or "#FFFFFF"
+        )
+        context.config.subtitle_font_size = int(
+            context.request.get("subtitle_font_size") or 40
+        )
+        context.config.subtitle_max_chars = int(
+            context.request.get("subtitle_max_chars") or 16
+        )
+
         # Inject optional template params / editing metadata for future use.
         if getattr(context, "editing_rules", None):
             context.config.template_params = {
@@ -317,3 +345,136 @@ class ScriptedAssetEditPipeline(AssetBasedPipeline):
             frame.narration = " ".join(scene.get("narrations", []))
 
         return context
+
+    # ── Cover generation ──────────────────────────────────────────────────────
+
+    async def post_production(self, context):
+        """
+        Override post_production to prepend a cover image/video to the final video.
+
+        Cover generation flow:
+        1. Determine cover title (from request or video title)
+        2. Attempt AI image generation via RunningHub (graceful fallback to text-only)
+        3. Render cover template via Playwright → cover.png (standalone file)
+        4. Create 3-second still video from cover.png → prepend to storyboard frames
+        5. Call parent post_production for concatenation + BGM
+        6. Restore original frame list
+        """
+        cover_enabled = context.request.get("cover_enabled", True)
+        cover_image_path = None
+
+        if cover_enabled:
+            cover_image_path = await self._generate_cover_image(context)
+            if cover_image_path:
+                context.cover_image_path = cover_image_path
+                cover_video_path = str(Path(context.task_dir) / "cover.mp4")
+                try:
+                    from pixelle_video.services.video import VideoService
+                    VideoService().create_still_video_with_silence(
+                        image=cover_image_path,
+                        output=cover_video_path,
+                        duration=3.0,
+                        fps=context.config.video_fps,
+                    )
+                    # Prepend a synthetic cover frame (index=-1) so parent concat picks it up
+                    cover_frame = StoryboardFrame(index=-1, narration='', image_prompt=None)
+                    cover_frame.video_segment_path = cover_video_path
+                    context.storyboard.frames.insert(0, cover_frame)
+                    logger.info(f"🖼️  Cover video segment created: {cover_video_path}")
+                except Exception as e:
+                    logger.warning(f"Cover video segment failed: {e}; skipping cover prepend")
+                    cover_image_path = None  # don't restore later if we didn't insert
+
+        await super().post_production(context)
+
+        # Remove the synthetic cover frame from the frame list after concat
+        if cover_image_path:
+            context.storyboard.frames = [f for f in context.storyboard.frames if f.index != -1]
+
+        return context
+
+    async def _generate_cover_image(self, context) -> Optional[str]:
+        """
+        Generate cover image.
+
+        Tries to produce an AI background via RunningHub using the configured
+        image workflow.  Falls back to a text-only cover if RunningHub is
+        unavailable or the call fails.
+
+        Returns local path to cover.png, or None on complete failure.
+        """
+        cover_title = context.request.get("cover_title") or context.title
+        if not cover_title:
+            logger.debug("No cover title available, skipping cover generation")
+            return None
+
+        frame_template = context.request.get("frame_template", "1080x1920/asset_default.html")
+        dims_prefix = frame_template.split("/")[0]  # e.g. "1080x1920"
+        cover_template_key = f"{dims_prefix}/cover_default.html"
+        cover_output = str(Path(context.task_dir) / "cover.png")
+
+        # Try AI image generation
+        ai_image_path: Optional[str] = None
+
+        # Check user-supplied reference image first
+        cover_ref = context.request.get("cover_ref_image")
+        if cover_ref and os.path.isfile(cover_ref):
+            ai_image_path = cover_ref
+            logger.info(f"Using user-provided cover reference image: {cover_ref}")
+
+        if ai_image_path is None:
+            try:
+                from pixelle_video.utils.template_util import resolve_template_path
+                from pixelle_video.services.frame_html import HTMLFrameGenerator
+
+                cover_tmpl_path = resolve_template_path(cover_template_key)
+                gen_tmp = HTMLFrameGenerator(cover_tmpl_path)
+                media_w, media_h = gen_tmp.get_media_size()
+
+                prompt = (
+                    f"Professional cinematic video cover art, {cover_title}, "
+                    "high quality, atmospheric lighting, visually striking composition"
+                )
+                media_result = await self.core.media(
+                    prompt=prompt,
+                    media_type='image',
+                    width=media_w,
+                    height=media_h,
+                    index=0,
+                )
+                if media_result.is_image and media_result.url:
+                    import httpx
+                    ai_dl_path = str(Path(context.task_dir) / "cover_ai.png")
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(60)) as client:
+                        resp = await client.get(media_result.url)
+                        resp.raise_for_status()
+                        with open(ai_dl_path, 'wb') as f:
+                            f.write(resp.content)
+                    ai_image_path = ai_dl_path
+                    logger.info(f"Cover AI image generated: {ai_dl_path}")
+            except Exception as e:
+                logger.warning(f"Cover AI image generation failed ({e}); using text-only cover")
+
+        # Render cover template via Playwright
+        try:
+            from pixelle_video.services.frame_html import HTMLFrameGenerator
+            from pixelle_video.utils.template_util import resolve_template_path
+
+            cover_tmpl_path = resolve_template_path(cover_template_key)
+            if not os.path.isfile(cover_tmpl_path):
+                logger.warning(f"Cover template not found: {cover_tmpl_path}")
+                return None
+
+            gen = HTMLFrameGenerator(cover_tmpl_path)
+            rendered = await gen.generate_frame(
+                title=cover_title,
+                text='',
+                image=ai_image_path or '',
+                ext={},
+                output_path=cover_output,
+            )
+            logger.success(f"Cover image rendered: {rendered}")
+            return rendered
+        except Exception as e:
+            logger.error(f"Cover rendering failed: {e}")
+            return None

@@ -49,11 +49,22 @@ class ScriptedAssetEditRequest(BaseModel):
         description="Template used for final frame composition"
     )
 
+    # === Cover generation ===
+    cover_enabled: bool = Field(True, description="Whether to generate a cover image prepended as the first frame")
+    cover_title: Optional[str] = Field(None, description="Cover title text (defaults to video title when None)")
+    cover_ref_image: Optional[str] = Field(None, description="Optional local path to a reference image for the cover background")
+
+    # === Subtitle configuration (MoviePy overlay) ===
+    subtitle_color: Optional[str] = Field(None, description="Subtitle text color as hex, e.g. '#FFFFFF'")
+    subtitle_font_size: Optional[int] = Field(None, ge=16, le=120, description="Subtitle font size in pixels (default 40)")
+    subtitle_max_chars: Optional[int] = Field(None, ge=5, le=50, description="Max characters per subtitle line (default 16)")
+
 
 class ScriptedAssetEditResponse(BaseModel):
     success: bool = True
     message: str = "Success"
     video_url: str
+    cover_image_url: Optional[str] = None
     duration: float
     file_size: int
 

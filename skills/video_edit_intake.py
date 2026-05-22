@@ -61,6 +61,14 @@ MODE_DEFAULTS: dict[str | None, dict[str, Any]] = {
         'pace':                 'medium',
         'transition_style':     'simple',
         'editing_instruction':  None,
+        # Cover generation (asked each session; None = use video title / no ref image)
+        'cover_enabled':        True,
+        'cover_title':          None,
+        'cover_ref_image':      None,
+        # Subtitle style (MoviePy overlay; None = use defaults at generation time)
+        'subtitle_color':       None,
+        'subtitle_font_size':   None,
+        'subtitle_max_chars':   None,
     },
     MODE_DIGITAL_HUMAN: {
         **_SHARED_DEFAULTS,
@@ -103,7 +111,11 @@ MODE_REQUIRED_FIELDS: dict[str | None, list[str]] = {
 MODE_RECOMMENDED_FIELDS: dict[str | None, list[str]] = {
     None:                [],
     MODE_QUICK_CREATE:   ['tts_workflow', 'ref_audio', 'bgm_path'],
-    MODE_CUSTOM_ASSETS:  ['tts_workflow', 'ref_audio', 'bgm_path', 'editing_instruction'],
+    MODE_CUSTOM_ASSETS: [
+        'cover_title', 'cover_ref_image',
+        'subtitle_color', 'subtitle_font_size', 'subtitle_max_chars',
+        'tts_workflow', 'ref_audio', 'bgm_path', 'editing_instruction',
+    ],
     MODE_DIGITAL_HUMAN:  [],
     MODE_IMAGE_TO_VIDEO: [],
     MODE_ACTION_TRANSFER: [],
@@ -134,6 +146,15 @@ MODE_FIELD_PROMPTS: dict[str, dict[str, str]] = {
         'asset_paths':          '请把图片或视频素材发给我；多个文件一条条发即可，我会全部收集。',
         'frame_template':       '你要竖屏（9:16）、横屏（16:9）还是方形（1:1）？',
         '_confirmed':           '素材已全部收到吗？发送「开始」来生成视频（如还有素材，直接继续发送即可）。',
+        'cover_title':          (
+            '视频封面设置：请输入封面标题（留空则使用视频标题），'
+            '如有参考图请提供本地文件路径或 URL，可一并回复。'
+            '\n示例：「封面标题 参考图：/path/img.jpg」，或直接回复「跳过」使用默认。'
+        ),
+        'cover_ref_image':      '如有封面参考图，请提供文件路径或 URL；没有请回复「无」。',
+        'subtitle_color':       '字幕颜色？（默认白色 #FFFFFF，可回复十六进制色值如 #FFFF00，或「默认」）',
+        'subtitle_font_size':   '字幕字号？（默认 40px，可回复数字如 48，或「默认」）',
+        'subtitle_max_chars':   '每行最多显示几个字？（默认 16，可回复数字，或「默认」）',
         'tts_workflow':         '你要用默认音色，还是指定一个 TTS 工作流？',
         'ref_audio':            '如果你想声音克隆，请发一段 mp3/wav 参考音频；不需要就跳过。',
         'bgm_path':             '要加背景音乐吗？说"默认 BGM"或发一个音频文件，不要就跳过。',
@@ -378,6 +399,14 @@ class IntakeState:
                 'transition_style':    d.get('transition_style', 'simple'),
                 'editing_instruction': d.get('editing_instruction'),
                 'source':              d.get('source', 'selfhost'),
+                # Cover generation
+                'cover_enabled':       d.get('cover_enabled', True),
+                'cover_title':         d.get('cover_title') or None,
+                'cover_ref_image':     d.get('cover_ref_image') or None,
+                # Subtitle config (None → use server defaults: #FFFFFF / 40 / 16)
+                'subtitle_color':      d.get('subtitle_color') or None,
+                'subtitle_font_size':  d.get('subtitle_font_size') or None,
+                'subtitle_max_chars':  d.get('subtitle_max_chars') or None,
             }
             # Multi-asset: sentence split ensures each asset gets a scene
             if len(payload['asset_paths']) > 1 and payload['split_mode'] == 'paragraph':
@@ -388,7 +417,8 @@ class IntakeState:
 
         # Normalize empty strings → None for optional fields
         optional = ['title', 'project_name', 'tts_workflow', 'ref_audio',
-                    'bgm_path', 'editing_instruction']
+                    'bgm_path', 'editing_instruction',
+                    'cover_title', 'cover_ref_image']
         for k in optional:
             if k in payload and isinstance(payload.get(k), str) and not payload[k].strip():
                 payload[k] = None

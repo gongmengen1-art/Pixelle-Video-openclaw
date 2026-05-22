@@ -31,11 +31,14 @@ OpenClaw IM Router Extension（inbound_claim，任意渠道）
   ↓ 提取 aspect_ratio / duration / script / assets 等字段
 Session 状态机（session_bridge.py + video_edit_intake.py）
   ↓ 多轮对话，缺失字段追问，信息齐全后触发执行
-Pixelle-Video API（POST /api/video/scripted-asset-edit/sync）
-  ↓ 文案拆分 → 素材映射 → edge-TTS → Playwright 渲染 → ffmpeg 合成
+Pixelle-Video API（POST /api/video/scripted-asset-edit/async）
+  ↓ 后台运行：文案拆分 → 素材映射 → edge-TTS → MoviePy 字幕 → AI 封面 → ffmpeg 合成
+  ↓ GET /api/tasks/{task_id} 实时返回进度百分比
+Telegram 进度消息（editMessageText，仅 Telegram 渠道）
+  ↓ ▓▓▓▓░░░░░░ 40%  →  🎉 完成
 阿里云 OSS（upload_to_oss.py）
   ↓ 上传 → 返回公网 URL → 本地任务目录立即清理
-IM 用户收到视频链接
+IM 用户收到视频链接 + 封面图链接
 ```
 
 ### 新增文件索引
@@ -44,9 +47,11 @@ IM 用户收到视频链接
 
 | 文件 | 说明 |
 |------|------|
-| `pixelle_video/pipelines/scripted_asset_edit.py` | 新增 pipeline，基于用户提供的文案+素材执行剪辑 |
-| `api/schemas/video_edit.py` | 请求/响应 Pydantic 模型 |
-| `api/routers/video_edit.py` | `POST /api/video/scripted-asset-edit/sync` 端点 |
+| `pixelle_video/pipelines/scripted_asset_edit.py` | 自定义素材 pipeline：封面生成（RunningHub AI + Playwright）、字幕模式切换 |
+| `pixelle_video/utils/subtitle_util.py` | MoviePy + PIL 字幕工具：文本分行、CJK 字体检测、渐进式字幕叠加 |
+| `templates/*/cover_default.html` | 封面模板（1080×1920 / 1920×1080 / 1080×1080），全屏 AI 背景 + 底部大标题 |
+| `api/schemas/video_edit.py` | 请求/响应 Pydantic 模型（含封面、字幕、异步响应字段） |
+| `api/routers/video_edit.py` | `POST /async`（异步 + 进度）和 `POST /sync` 两个端点 |
 
 #### Skill 收集层（`skills/`）
 
@@ -162,6 +167,9 @@ uv run python3 skills/video-edit-assistant/e2e_test.py \
 
 ## 📋 最近更新
 
+- ✅ **2026-05-22**: 自定义素材模式新增 **Telegram 实时进度条**：生成期间自动推送并实时编辑进度消息（`▓▓▓▓░░░░░░ 40%`），完成后直接替换为结果链接；底层采用 async API + NDJSON 流式传输
+- ✅ **2026-05-22**: 自定义素材模式新增 **AI 封面生成**：Intake 收集封面标题与可选参考图，通过 RunningHub image_flux 生成配图，Playwright 渲染后作为视频首帧（3 s 静帧）并同时输出独立 `cover.png`
+- ✅ **2026-05-22**: 自定义素材模式新增 **自定义字幕**：MoviePy + PIL 渲染（无 ImageMagick 依赖），支持每行最多字数 / 颜色 / 字号配置，自动分段 + 半透明背景，彻底解决字幕行数过多导致排版凌乱问题
 - ✅ **2026-05-18**: 支持多 IM 渠道路由（飞书、企业微信、Slack 等），skill 自动注册到 OpenClaw workspace/skills/，`inbound_claim` 不再限定 Telegram
 - ✅ **2026-05-18**: 修复 Playwright Chromium 在不支持的 OS（如 Ubuntu 26.04）上的安装失败问题，自动降级使用系统 Chromium 并持久化配置
 - ✅ **2026-01-26**: 新增「动作迁移」模块，上传参考视频和图片进行动作迁移
