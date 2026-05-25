@@ -317,7 +317,7 @@ PYEOF
   ok "config.yaml 已生成"
 fi
 
-# ── 6. Systemd 服务（Pixelle-Video API）────────────────────────────────────
+# ── 6. 系统服务（Pixelle-Video API）─────────────────────────────────────────
 section "注册 Pixelle-Video API 系统服务"
 
 SERVICE_NAME="pixelle-video-api"
@@ -325,6 +325,7 @@ UV_BIN="$(command -v uv || echo "$HOME/.local/bin/uv")"
 CURRENT_USER="$(whoami)"
 
 if command -v systemctl &>/dev/null && [[ "$OS" == "Linux" ]]; then
+  # ── Linux：systemd ────────────────────────────────────────────────────────
   SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
   info "生成 systemd 服务文件：${SERVICE_FILE}"
 
@@ -358,8 +359,87 @@ EOF
     warn "服务未能启动，查看日志：journalctl -u ${SERVICE_NAME} -n 50"
   fi
 
+elif [[ "$OS" == "Darwin" ]]; then
+  # ── macOS：launchd LaunchAgent ────────────────────────────────────────────
+  PLIST_LABEL="com.pixellevideo.api"
+  PLIST_FILE="${HOME}/Library/LaunchAgents/${PLIST_LABEL}.plist"
+  MACOS_LOG_DIR="${HOME}/Library/Logs/pixelle-video"
+  LAUNCHER="${SCRIPT_DIR}/.pixelle-launcher.sh"
+  mkdir -p "${MACOS_LOG_DIR}" "${HOME}/Library/LaunchAgents"
+
+  # 生成启动包装脚本（负责加载 .env 环境变量）
+  cat > "${LAUNCHER}" << LAUNCHEOF
+#!/bin/bash
+set -a
+[ -f '${SCRIPT_DIR}/.env' ] && . '${SCRIPT_DIR}/.env'
+set +a
+exec '${UV_BIN}' run python api/app.py --host 127.0.0.1 --port ${API_PORT}
+LAUNCHEOF
+  chmod +x "${LAUNCHER}"
+
+  info "生成 launchd 服务文件：${PLIST_FILE}"
+  cat > "${PLIST_FILE}" << PLISTEOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${PLIST_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${LAUNCHER}</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>${SCRIPT_DIR}</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${MACOS_LOG_DIR}/api.log</string>
+    <key>StandardErrorPath</key>
+    <string>${MACOS_LOG_DIR}/api-error.log</string>
+    <key>ThrottleInterval</key>
+    <integer>5</integer>
+</dict>
+</plist>
+PLISTEOF
+
+  # 卸载已有服务（幂等），再重新加载
+  launchctl bootout "gui/$(id -u)" "${PLIST_FILE}" 2>/dev/null \
+    || launchctl unload "${PLIST_FILE}" 2>/dev/null || true
+  sleep 1
+
+  _launchd_loaded=false
+  if launchctl bootstrap "gui/$(id -u)" "${PLIST_FILE}" 2>/dev/null; then
+    _launchd_loaded=true
+  elif launchctl load -w "${PLIST_FILE}" 2>/dev/null; then
+    _launchd_loaded=true
+  fi
+
+  if [[ "${_launchd_loaded}" == "true" ]]; then
+    sleep 3
+    if launchctl list "${PLIST_LABEL}" 2>/dev/null | grep -q '"PID"'; then
+      ok "launchd 服务 ${PLIST_LABEL} 已启动并设为登录自启"
+      ok "服务日志：${MACOS_LOG_DIR}/api.log"
+    else
+      warn "服务已加载但进程未启动，查看日志：tail -f ${MACOS_LOG_DIR}/api.log"
+    fi
+  else
+    warn "launchctl 加载失败，尝试直接后台运行 …"
+    pkill -f "python api/app.py" 2>/dev/null || true
+    nohup "${LAUNCHER}" > "${MACOS_LOG_DIR}/api.log" 2>&1 &
+    ok "API 后台进程已启动（日志：${MACOS_LOG_DIR}/api.log）"
+    sleep 4
+  fi
+
 else
-  # macOS / 无 systemd 环境：后台运行
+  # ── 其他环境（无 systemd）：nohup 后台运行 ───────────────────────────────
   warn "当前环境无 systemd，以后台进程方式启动 API"
   pkill -f "python api/app.py" 2>/dev/null || true
   nohup bash -c "
@@ -918,5 +998,9 @@ echo -e "  Bot 应回复追问缺少的信息（文案 / 素材 / 画幅）"
 echo ""
 if command -v systemctl &>/dev/null && [[ "$OS" == "Linux" ]]; then
   echo -e "  查看 API 日志：${CYN}journalctl -u ${SERVICE_NAME} -f${RST}"
+elif [[ "$OS" == "Darwin" ]]; then
+  echo -e "  查看 API 日志：${CYN}tail -f ${HOME}/Library/Logs/pixelle-video/api.log${RST}"
+  echo -e "  服务状态     ：${CYN}launchctl list com.pixellevideo.api${RST}"
+  echo -e "  停止服务     ：${CYN}launchctl bootout gui/\$(id -u) ~/Library/LaunchAgents/com.pixellevideo.api.plist${RST}"
 fi
 echo ""
