@@ -611,11 +611,11 @@ import { readdir } from "node:fs/promises";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
-const DEFAULT_PYTHON = ${PYTHON_BIN@Q};
-const DEFAULT_SCRIPT = ${ROUTE_SCRIPT@Q};
-const DEFAULT_CWD = ${SCRIPT_DIR@Q};
+const DEFAULT_PYTHON = "${PYTHON_BIN}";
+const DEFAULT_SCRIPT = "${ROUTE_SCRIPT}";
+const DEFAULT_CWD = "${SCRIPT_DIR}";
 const DEFAULT_API_BASE = "http://127.0.0.1:${API_PORT}";
-const DEFAULT_SESSION_DIR = ${SESSION_DIR@Q};
+const DEFAULT_SESSION_DIR = "${SESSION_DIR}";
 const TRIGGERS = ["/video-edit", "/video_edit", "video-edit:", "视频剪辑："];
 const COMMAND_ALIASES = ["video_edit", "video_edit_assistant"];
 const MEDIA_EXT = /\\.(mp4|mov|m4v|webm|avi|mkv|jpg|jpeg|png|webp|gif|wav|mp3|m4a)$/i;
