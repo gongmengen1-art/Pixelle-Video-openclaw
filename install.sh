@@ -70,8 +70,31 @@ ARCH="$(uname -m)"
 info "OS: ${OS} / ARCH: ${ARCH}"
 
 if [[ "$OS" == "Darwin" ]]; then
-  PKG_INSTALL="brew install"
-  PKG_CHECK="brew list"
+  # Homebrew 在 Apple Silicon 上装在 /opt/homebrew，Intel 装在 /usr/local；
+  # 非交互式 shell 的 PATH 里常常没有这两个路径，需提前补全。
+  for _brew_prefix in /opt/homebrew /usr/local; do
+    if [[ -x "${_brew_prefix}/bin/brew" ]]; then
+      export PATH="${_brew_prefix}/bin:${_brew_prefix}/sbin:${PATH}"
+      break
+    fi
+  done
+
+  if command -v brew &>/dev/null; then
+    PKG_INSTALL="brew install"
+    PKG_CHECK="brew list"
+  else
+    warn "未找到 Homebrew，正在安装 …"
+    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+    # 安装完成后再次补全 PATH
+    for _brew_prefix in /opt/homebrew /usr/local; do
+      if [[ -x "${_brew_prefix}/bin/brew" ]]; then
+        export PATH="${_brew_prefix}/bin:${_brew_prefix}/sbin:${PATH}"
+        break
+      fi
+    done
+    PKG_INSTALL="brew install"
+    PKG_CHECK="brew list"
+  fi
 elif command -v apt-get &>/dev/null; then
   PKG_INSTALL="sudo apt-get install -y"
   PKG_CHECK="dpkg -l"
